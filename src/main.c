@@ -29,6 +29,11 @@ typedef array_type(mat4) mat4array_t;
 typedef array_type(float) floatarray_t;
 typedef array_type(u32) u32array_t;
 
+int cgltf_get_node_index(cgltf_node *target, cgltf_node *nodes, u32 nodes_len);
+void cgltf_get_scalar_values(floatarray_t *out, u32 comp_count,
+                             const cgltf_accessor *in_accessor);
+char **cgltf_load_joint_names(cgltf_data *data);
+
 typedef struct {
   char **_Nullable ptr;
   usize len;
@@ -118,6 +123,8 @@ typedef struct {
   quat rotation;
   vec3 scale;
 } Transform;
+
+Transform cgltf_get_local_transform(cgltf_node *n);
 
 // Order is right -> left
 Transform transform_combine(Transform a, Transform b) {
@@ -226,16 +233,16 @@ mat4 transform_to_mat4(Transform t) {
 
 // Some important things to note. Each joint has a transform and a parent.
 //
-// A transform is a slimmer representation of a linear transformation, they get
-// turned into matrices when handed over to the GPU.
+// A transform is a slimmer representation of a linear transformation, they
+// get turned into matrices when handed over to the GPU.
 //
 // The transform takes vertices from its parent's coordinate space, and
 // transforms them into the joint's coordinate space.
 //
 // If you concatenate a joint's transform with its parent's and its parent's
-// parent's and so on, you will get a transformation that transforms a vertex in
-// the joint's coordinate space to a vertex in object/model space. In this code
-// we call that a joint's global transformation.
+// parent's and so on, you will get a transformation that transforms a vertex
+// in the joint's coordinate space to a vertex in object/model space. In this
+// code we call that a joint's global transformation.
 //
 // Another important transformation is the one carried by a joint's `inverse
 // bind matrix`. It basically does the opposite of a joint's global
@@ -316,8 +323,8 @@ Pose pose_load_rest_pose_from_cgltf(cgltf_data *data) {
   return out;
 }
 
-// glTF stores inverse bind pose matrix for each joint. We want bind pose. To do
-// this we load the rest pose and invert each joint's matrix. Inverting an
+// glTF stores inverse bind pose matrix for each joint. We want bind pose. To
+// do this we load the rest pose and invert each joint's matrix. Inverting an
 // inverse matrix returns the original matrix.
 //
 // We default to the joint's world space / global matrix in the case that the
@@ -345,7 +352,7 @@ Pose pose_load_bind_pose_from_cgltf(cgltf_data *data, Pose rest_pose) {
                             skin->inverse_bind_matrices);
 
     u32 num_joints = skin->joints_count;
-    for (int j = 0; j < num_joints; j++) {
+    for (u32 j = 0; j < num_joints; j++) {
       float *matrix = &inv_bind_accessor.ptr[j * 16];
       // Inverse bind matrix: Space(model/world) -> Space(bone)
       // Re-invert to: Space(bone) -> Space(model/world)
@@ -379,7 +386,8 @@ Pose pose_load_bind_pose_from_cgltf(cgltf_data *data, Pose rest_pose) {
   return bind_pose;
 }
 
-// When passing to GPU, pose needs to be converted to a linear array of matrices
+// When passing to GPU, pose needs to be converted to a linear array of
+// matrices
 void pose_get_matrix_palette(const Pose *pose, mat4array_t *matrices) {
   if (matrices->cap != pose->len) {
     array_reserve(mat4, matrices, pose->len);
@@ -414,6 +422,8 @@ typedef struct {
   mat4 *inv_bind_pose;
   u32 joints_len;
 } Skeleton;
+
+void skeleton_update_inverse_bind_pose(Skeleton *sk);
 
 Skeleton skeleton_load(cgltf_data *data) {
   Pose rest_pose = pose_load_rest_pose_from_cgltf(data);
@@ -475,7 +485,7 @@ void bonemesh_cpu_skin(BoneMesh *mesh, const Skeleton *sk, const Pose *p) {
     return;
 
   mat4array_t *palette = &mesh->pose_palette;
-  pose_get_matrix_palette(p, &palette);
+  pose_get_matrix_palette(p, palette);
   mat4 *inv_pose_palette = sk->inv_bind_pose;
 
   for (u32 i = 0; i < num_verts; i++) {
@@ -607,14 +617,14 @@ void bonemesh_from_attribute(BoneMesh *out_mesh, cgltf_attribute *attribute,
           HMM_V4(values.ptr[index], values.ptr[index + 1],
                  values.ptr[index + 2], values.ptr[index + 3]);
       break;
-    case cgltf_attribute_type_joints:
-      // These indices are skin relative. This function has no information about
-      // the skin that is being parsed. Add +0.5f to round, since we can't read
-      // ints
-      ivec4 joints = {(int)(values.ptr[index + 0] + 0.5f),
-                      (int)(values.ptr[index + 1] + 0.5f),
-                      (int)(values.ptr[index + 2] + 0.5f),
-                      (int)(values.ptr[index + 3] + 0.5f)};
+    case cgltf_attribute_type_joints: {
+      // These indices are skin relative. This function has no information
+      // about the skin that is being parsed. Add +0.5f to round, since we
+      // can't read ints
+      ivec4 joints = {.v = {(int)(values.ptr[index + 0] + 0.5f),
+                            (int)(values.ptr[index + 1] + 0.5f),
+                            (int)(values.ptr[index + 2] + 0.5f),
+                            (int)(values.ptr[index + 3] + 0.5f)}};
 
       // Now convert from being relative to joints array to being relative to
       // the skeleton hierarchy
@@ -627,6 +637,9 @@ void bonemesh_from_attribute(BoneMesh *out_mesh, cgltf_attribute *attribute,
       joints.w = MAX(
           0, cgltf_get_node_index(skin->joints[joints.w], nodes, node_count));
       out_mesh->influences[i] = joints;
+      break;
+    }
+    default:
       break;
     }
   }
@@ -785,7 +798,20 @@ void init(void) {
 
   cgltf_options opts = {};
   cgltf_data *data = NULL;
-  ModelData model_data = load_cgltf(&opts, data);
+  if (cgltf_parse_file(&opts, "./src/assets/scene.gltf", &data) !=
+      cgltf_result_success) {
+    printf("Failed to parse scene\n");
+    exit(1);
+  }
+
+  if (cgltf_load_buffers(&opts, data, "./src/assets/") !=
+      cgltf_result_success) {
+    cgltf_free(data);
+    printf("Failed to load buffers\n");
+    exit(1);
+  }
+
+  bonemesh_array_t meshes = bonemesh_load_meshes(data);
 
   /* __dbgui_setup(sapp_sample_count()); */
 
@@ -853,7 +879,8 @@ void init(void) {
 }
 
 void frame(void) {
-  /* NOTE: the vs_params_t struct has been code-generated by the shader-code-gen
+  /* NOTE: the vs_params_t struct has been code-generated by the
+   * shader-code-gen
    */
   vs_params_t vs_params;
   const float w = sapp_widthf();

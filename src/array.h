@@ -102,7 +102,7 @@ void _array_shrink_to_fit(array_t *arr) {
 #define array_push(T, a, val)                                                  \
   ({                                                                           \
     static_assert(__same_type(T, __typeof__(val)), "");                        \
-    array_t *__a = (a);                                                        \
+    array_t *__a = (array_t *)(a);                                             \
     (__a->len >= __a->cap && UNLIKELY(!array_grow(__a, sizeof(T), 1)))         \
         ? false                                                                \
         : (((T *)__a->ptr)[__a->len++] = (val), true);                         \
