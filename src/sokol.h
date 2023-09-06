@@ -8,6 +8,12 @@
 #elif defined(__linux__)
 #define SOKOL_GLCORE33
 #endif
-#include "../lib/sokol/sokol_app.h"
-#include "../lib/sokol/sokol_gfx.h"
-#include "../lib/sokol/sokol_log.h"
+// #include "../lib/sokol/sokol_app.h"
+// #include "../lib/sokol/sokol_gfx.h"
+// #include "../lib/sokol/sokol_log.h"
+#include <sokol/sokol_app.h>
+#include <sokol/sokol_gfx.h>
+#include <sokol/sokol_log.h>
+
+typedef struct Hello {
+} Nice;

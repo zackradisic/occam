@@ -1,8 +1,16 @@
 {
+  "cmake.configureOnOpen": false,
   "files.associations": {
     "cube.glsl.h": "c",
+    "sokol_libs.h": "c",
     "sokol_glue.h": "c",
     "sokol.h": "c",
-    "handmademath.h": "c"
+    "handmademath.h": "c",
+    "cgltf.h": "c",
+    "sokol_gfx.h": "c",
+    "sokol_app.h": "c",
+    "atomic": "c",
+    "memory": "c",
+    "semaphore": "c"
   }
 }
