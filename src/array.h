@@ -20,13 +20,13 @@ typedef struct {
 
 void _array_init(array_t *arr, usize cap, usize elem_size) {
   usize actual_cap = cap < 4 ? 4 : cap;
-  u8 *ptr = malloc(elem_size * actual_cap);
+  u8 *ptr = (u8 *)malloc(elem_size * actual_cap);
   arr->ptr = ptr;
   arr->cap = actual_cap;
   arr->len = 0;
 }
 
-void array_free(array_t *arr) {
+void _array_free(array_t *arr) {
   free(arr->ptr);
   arr->ptr = NULL;
   arr->cap = 0;
@@ -46,7 +46,11 @@ static bool array_resize(array_t *a, usize elemsize, usize newcap) {
   if (check_mul_overflow((usize)newcap, (usize)elemsize, &newsize))
     return false;
 
-  a->ptr = realloc(a->ptr, newsize);
+  a->ptr =
+      // is realloc on NULL fucked?
+      a->ptr == NULL ? ((u8 *)malloc(newsize * elemsize))
+                     : (u8 *)realloc(a->ptr, newsize);
+
   a->cap = newcap;
   return true;
 }
@@ -98,6 +102,7 @@ void _array_shrink_to_fit(array_t *arr) {
 #define array_empty(T) ((T){.ptr = NULL, .len = 0, .cap = 0})
 #define array_init(T, a, cap) _array_init((array_t *)a, cap, sizeof(T))
 #define array_shrink_to_fit(a) _array_shrink_to_fit((array_t *)a)
+#define array_free(a) _array_free((array_t *)a)
 
 #define array_push(T, a, val)                                                  \
   ({                                                                           \

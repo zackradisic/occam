@@ -36,6 +36,8 @@ int float_eq(float a, float b);
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
+#define ZERO(a) memset(&a, 0, sizeof(a))
+
 #define IS_POWER_OF_TWO(x) ((x) && !((x) & ((x)-1)))
 /* static inline const int is_power_of_two(int x) { */
 /*   /\* First x in the below expression is for the case when x is 0 *\/ */

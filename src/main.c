@@ -6,7 +6,7 @@
 #include "common.h"
 #include <sokol/sokol_glue.h>
 #include "sokol.h"
-#include "shaders/cube.glsl.h"
+#include "shaders/bonemesh.glsl.h"
 #include "stdio.h"
 #include "arena.h"
 #include <sokol/sokol_glue.h>
@@ -18,6 +18,9 @@ ASSUME_NONNULL_BEGIN
 
 #define QUAT_EPSILON 0.000001f
 #define VEC3_EPSILON 0.000001f
+
+#define SG_RANGE_ARR(T, a)                                                     \
+  (sg_range) { .ptr = a.ptr, .size = sizeof(T) * a.len }
 
 typedef HMM_Vec2 vec2;
 typedef HMM_Vec3 vec3;
@@ -34,6 +37,13 @@ void cgltf_get_scalar_values(floatarray_t *out, u32 comp_count,
                              const cgltf_accessor *in_accessor);
 char **cgltf_load_joint_names(cgltf_data *data);
 
+const mat4 OPENGL_TO_METAL_MATRIX = (mat4){
+    .Elements = {{1.0f, 0.0f, 0.0f, 0.0f},
+                 {0.0f, 1.0f, 0.0f, 0.0f},
+                 {0.0f, 0.0f, 0.5f, 0.0f},
+                 {0.0f, 0.0f, 0.5f, 1.0f}},
+};
+
 typedef struct {
   char **_Nullable ptr;
   usize len;
@@ -48,14 +58,23 @@ typedef struct {
   int influences[4];
 } Vertex;
 
+// typedef union {
+//   struct {
+//     int x, y, z, w;
+//   };
+
+//   int v[4];
+
+// } ivec4;
+
 typedef union {
   struct {
-    int x, y, z, w;
+    u16 x, y, z, w;
   };
 
-  int v[4];
+  u16 v[4];
 
-} ivec4;
+} shortvec4;
 
 mat4 mat4_new(float _00, float _01, float _02, float _03, float _10, float _11,
               float _12, float _13, float _20, float _21, float _22, float _23,
@@ -285,8 +304,8 @@ void pose_resize(Pose *pose, u32 new_joints_len) {
 
 void pose_cpy(const Pose *src, Pose *dest) {
   pose_init(dest, src->len);
-  memcpy(dest->joints, src->joints, src->len);
-  memcpy(dest->parents, src->parents, src->len);
+  memcpy(dest->joints, src->joints, sizeof(Transform) * src->len);
+  memcpy(dest->parents, src->parents, sizeof(int) * src->len);
 }
 
 Transform pose_get_local_transform(const Pose *pose, u32 index) {
@@ -316,7 +335,7 @@ Pose pose_load_rest_pose_from_cgltf(cgltf_data *data) {
     cgltf_node *node = &data->nodes[i];
     Transform transform = cgltf_get_local_transform(node);
     out.joints[i] = transform;
-    int parent = cgltf_get_node_index(node, data->nodes, bone_count);
+    int parent = cgltf_get_node_index(node->parent, data->nodes, bone_count);
     out.parents[i] = parent;
   }
 
@@ -427,6 +446,11 @@ void skeleton_update_inverse_bind_pose(Skeleton *sk);
 
 Skeleton skeleton_load(cgltf_data *data) {
   Pose rest_pose = pose_load_rest_pose_from_cgltf(data);
+  // printf("PARENTS: [\n");
+  // for (u32 i = 0; i < rest_pose.len; i++) {
+  //   printf("  %d: %d,\n", i, rest_pose.parents[i]);
+  // }
+  // printf("[\n");
   Skeleton sk = {.rest_pose = rest_pose,
                  .bind_pose = pose_load_bind_pose_from_cgltf(data, rest_pose),
                  .joint_names = cgltf_load_joint_names(data),
@@ -453,7 +477,8 @@ typedef struct {
   vec2 *texcoords;
   vec3 *norms;
   vec4 *weights;
-  ivec4 *influences;
+  // ivec4 *influences;
+  shortvec4 *influences;
   vec3 *skinned_positions;
   vec3 *skinned_normals;
   u32 vertices_len;
@@ -489,7 +514,8 @@ void bonemesh_cpu_skin(BoneMesh *mesh, const Skeleton *sk, const Pose *p) {
   mat4 *inv_pose_palette = sk->inv_bind_pose;
 
   for (u32 i = 0; i < num_verts; i++) {
-    ivec4 joint = mesh->influences[i];
+    // ivec4 joint = mesh->influences[i];
+    shortvec4 joint = mesh->influences[i];
     vec4 weight = mesh->weights[i];
 
     mat4 m0 = HMM_MulM4F(
@@ -521,7 +547,8 @@ void bonemesh_cpu_skin1(BoneMesh *mesh, const Skeleton *sk, const Pose *p) {
   Pose bind_pose = sk->bind_pose;
 
   for (u32 i = 0; i < num_verts; i++) {
-    ivec4 *joint = &mesh->influences[i];
+    // ivec4 *joint = &mesh->influences[i];
+    shortvec4 *joint = &mesh->influences[i];
     vec4 weight = mesh->weights[i];
 
     Transform skin0 =
@@ -565,14 +592,15 @@ void bonemesh_cpu_skin1(BoneMesh *mesh, const Skeleton *sk, const Pose *p) {
 void bonemesh_init_attributes(BoneMesh *mesh, cgltf_attribute *attribute) {
   cgltf_accessor *accessor = attribute->data;
   u32 len = accessor->count;
-  if (len == 0)
+  if (len == 0 || mesh->vertices_len != 0)
     return;
 
   mesh->positions = malloc(sizeof(vec3) * len);
   mesh->texcoords = malloc(sizeof(vec2) * len);
   mesh->norms = malloc(sizeof(vec3) * len);
   mesh->weights = malloc(sizeof(vec4) * len);
-  mesh->influences = malloc(sizeof(ivec4) * len);
+  // mesh->influences = malloc(sizeof(ivec4) * len);
+  mesh->influences = malloc(sizeof(shortvec4) * len);
   mesh->skinned_positions = malloc(sizeof(vec3) * len);
   mesh->skinned_normals = malloc(sizeof(vec3) * len);
   mesh->vertices_len = len;
@@ -618,16 +646,20 @@ void bonemesh_from_attribute(BoneMesh *out_mesh, cgltf_attribute *attribute,
                  values.ptr[index + 2], values.ptr[index + 3]);
       break;
     case cgltf_attribute_type_joints: {
-      // These indices are skin relative. This function has no information
-      // about the skin that is being parsed. Add +0.5f to round, since we
-      // can't read ints
-      ivec4 joints = {.v = {(int)(values.ptr[index + 0] + 0.5f),
-                            (int)(values.ptr[index + 1] + 0.5f),
-                            (int)(values.ptr[index + 2] + 0.5f),
-                            (int)(values.ptr[index + 3] + 0.5f)}};
+      // These indices are skin relative. This function has no
+      // information about the skin that is being parsed. Add +0.5f to
+      // round, since we can't read ints
+      // ivec4 joints = {.v = {(int)(values.ptr[index + 0] + 0.5f),
+      //                       (int)(values.ptr[index + 1] + 0.5f),
+      //                       (int)(values.ptr[index + 2] + 0.5f),
+      //                       (int)(values.ptr[index + 3] + 0.5f)}};
+      shortvec4 joints = {.v = {(int)(values.ptr[index + 0] + 0.5f),
+                                (int)(values.ptr[index + 1] + 0.5f),
+                                (int)(values.ptr[index + 2] + 0.5f),
+                                (int)(values.ptr[index + 3] + 0.5f)}};
 
-      // Now convert from being relative to joints array to being relative to
-      // the skeleton hierarchy
+      // Now convert from being relative to joints array to being
+      // relative to the skeleton hierarchy
       joints.x = MAX(
           0, cgltf_get_node_index(skin->joints[joints.x], nodes, node_count));
       joints.y = MAX(
@@ -643,6 +675,8 @@ void bonemesh_from_attribute(BoneMesh *out_mesh, cgltf_attribute *attribute,
       break;
     }
   }
+
+  array_free(&values);
 }
 
 bonemesh_array_t bonemesh_load_meshes(cgltf_data *data) {
@@ -750,6 +784,12 @@ static struct {
   float rx, ry;
   sg_pipeline pip;
   sg_bindings bind;
+  BoneMesh bm;
+  Skeleton sk;
+  Pose animated_pose;
+  mat4array_t pose_palette;
+  mat4array_t inv_bind_pose;
+  vs_params_t vs_params;
 } state;
 
 typedef struct ModelData {
@@ -760,19 +800,27 @@ typedef struct ModelData {
 ModelData load_cgltf(cgltf_options *opts, cgltf_data *data) {
   ModelData model_data = {};
 
-  if (cgltf_parse_file(opts, "./src/assets/scene.gltf", &data) !=
+  if (cgltf_parse_file(opts, "./src/assets/Woman.gltf", &data) !=
       cgltf_result_success) {
     printf("Failed to parse scene\n");
     exit(1);
   }
 
-  if (cgltf_load_buffers(opts, data, "./src/assets/") != cgltf_result_success) {
+  if (cgltf_load_buffers(opts, data, "./src/assets/Woman.gltf") !=
+      cgltf_result_success) {
     cgltf_free(data);
     printf("Failed to load buffers\n");
     exit(1);
   }
 
+  if (cgltf_validate(data) != cgltf_result_success) {
+    cgltf_free(data);
+    printf("glTF data validation failed!\n");
+    exit(1);
+  }
+
   const cgltf_mesh *mesh = &data->meshes[0];
+
   for (usize i = 0; i < mesh->primitives_count; i++) {
     const cgltf_primitive *prim = &mesh->primitives[i];
     for (usize i = 0; i < prim->attributes_count; i++) {
@@ -790,6 +838,41 @@ ModelData load_cgltf(cgltf_options *opts, cgltf_data *data) {
   return model_data;
 }
 
+void set_vs_params() {
+  vs_params_t vs_params;
+  ZERO(vs_params);
+  // const float w = sapp_widthf();
+  // const float h = sapp_heightf();
+  const float w = 800;
+  const float h = 600;
+  //   const float t = (float)(sapp_frame_duration() * 60.0);
+  // const float t = (float)(sapp_frame_duration());
+  const float t = 1.0;
+
+  HMM_Mat4 proj = HMM_Perspective_LH_ZO(60.0f, w / h, 0.01f, 10.0f);
+  HMM_Mat4 view = HMM_LookAt_LH((HMM_Vec3){.X = 0.0f, .Y = 1.5f, .Z = 6.0f},
+                                (HMM_Vec3){.X = 0.0f, .Y = 0.0f, .Z = 0.0f},
+                                (HMM_Vec3){.X = 0.0f, .Y = 1.0f, .Z = 0.0f});
+  state.rx += 1.0f * t;
+  state.ry += 2.0f * t;
+  HMM_Mat4 rxm = HMM_Rotate_LH(state.rx, (HMM_Vec3){{1.0f, 0.0f, 0.0f}});
+  HMM_Mat4 rym = HMM_Rotate_LH(state.ry, (HMM_Vec3){{0.0f, 1.0f, 0.0f}});
+  HMM_Mat4 model = HMM_MulM4(
+      HMM_Translate(HMM_V3(-0.5, 0.0, -0.5)),
+      HMM_MulM4(HMM_MulM4(rxm, rym), HMM_Scale(HMM_V3(0.01, .01, .01))));
+  // HMM_MulM4(HMM_MulM4(rxm, rym), HMM_Scale(HMM_V3(1.01, 1.01, 1.01))));
+
+  vs_params.model = model;
+  vs_params.view = view;
+  vs_params.projection = proj;
+  memcpy(&vs_params.pose, state.pose_palette.ptr,
+         sizeof(mat4) * state.pose_palette.len);
+  memcpy(&vs_params.invBindPose, state.inv_bind_pose.ptr,
+         sizeof(mat4) * state.inv_bind_pose.len);
+
+  state.vs_params = vs_params;
+}
+
 void init(void) {
   sg_setup(&(sg_desc){
       .context = sapp_sgcontext(),
@@ -797,76 +880,124 @@ void init(void) {
   });
 
   cgltf_options opts = {};
+  ZERO(opts);
   cgltf_data *data = NULL;
-  if (cgltf_parse_file(&opts, "./src/assets/scene.gltf", &data) !=
-      cgltf_result_success) {
+  const char *path = "./src/assets/Woman.gltf";
+  // const char *path = "./src/assets/scene.gltf";
+  if (cgltf_parse_file(&opts, path, &data) != cgltf_result_success) {
     printf("Failed to parse scene\n");
     exit(1);
   }
+  printf("Parsed file\n");
 
-  if (cgltf_load_buffers(&opts, data, "./src/assets/") !=
-      cgltf_result_success) {
+  if (cgltf_load_buffers(&opts, data, path) != cgltf_result_success) {
     cgltf_free(data);
     printf("Failed to load buffers\n");
     exit(1);
   }
+  printf("Loaded buffers\n");
+
+  if (cgltf_validate(data) != cgltf_result_success) {
+    cgltf_free(data);
+    printf("glTF data validation failed!\n");
+    exit(1);
+  }
+  printf("Validated glTF\n");
 
   bonemesh_array_t meshes = bonemesh_load_meshes(data);
+  printf("Loaded meshes\n");
+  state.bm = meshes.ptr[0];
+  state.sk = skeleton_load(data);
+  printf("Loaded skeleton\n");
+  state.animated_pose = state.sk.rest_pose;
+  state.pose_palette = array_empty(mat4array_t);
+  printf("Getting matrix palette %d\n", state.animated_pose.len);
+  pose_get_matrix_palette(&state.animated_pose, &state.pose_palette);
+  printf("Got matrix palette\n");
+  state.inv_bind_pose = (mat4array_t){
+      .ptr = state.sk.inv_bind_pose,
+      .len = state.sk.joints_len,
+      .cap = state.sk.joints_len,
+  };
+
+  printf("VERTICES LEN: %d\n", state.bm.vertices_len);
+  printf("INDICES LEN: %zu\n", state.bm.indices.len);
+
+  /* create shader */
+  sg_shader shd = sg_make_shader(bonemesh_shader_desc(sg_query_backend()));
+
+  // BoneMesh *mesh = &meshes.ptr[0];
 
   /* __dbgui_setup(sapp_sample_count()); */
 
-  /* cube vertex buffer */
-  float vertices[] = {
-      -1.0, -1.0, -1.0, 1.0,  0.0,  0.0,  1.0,  1.0,  -1.0, -1.0,
-      1.0,  0.0,  0.0,  1.0,  1.0,  1.0,  -1.0, 1.0,  0.0,  0.0,
-      1.0,  -1.0, 1.0,  -1.0, 1.0,  0.0,  0.0,  1.0,
+  // TODO: sizeof on the length
+  sg_buffer vbuf = sg_make_buffer(&(sg_buffer_desc){
+      .data =
+          (sg_range){state.bm.positions, sizeof(vec3) * state.bm.vertices_len},
+      .label = "model-vertices"});
+  sg_buffer txbuf = sg_make_buffer(&(sg_buffer_desc){
+      .data =
+          (sg_range){state.bm.texcoords, sizeof(vec2) * state.bm.vertices_len},
+      .label = "model-texcoords"});
+  sg_buffer normbuf = sg_make_buffer(&(sg_buffer_desc){
+      .data = (sg_range){state.bm.norms, sizeof(vec3) * state.bm.vertices_len},
+      .label = "model-norm"});
+  sg_buffer weightbuf = sg_make_buffer(&(sg_buffer_desc){
+      .data =
+          (sg_range){state.bm.weights, sizeof(vec4) * state.bm.vertices_len},
+      .label = "model-weights"});
+  sg_buffer influencebuf = sg_make_buffer(&(sg_buffer_desc){
+      // .data = (sg_range){(vec4 *)state.bm.influences,
+      //                    sizeof(ivec4) * state.bm.vertices_len},
+      .data = (sg_range){state.bm.influences,
+                         sizeof(shortvec4) * state.bm.vertices_len},
+      .label = "model-influences"});
 
-      -1.0, -1.0, 1.0,  0.0,  1.0,  0.0,  1.0,  1.0,  -1.0, 1.0,
-      0.0,  1.0,  0.0,  1.0,  1.0,  1.0,  1.0,  0.0,  1.0,  0.0,
-      1.0,  -1.0, 1.0,  1.0,  0.0,  1.0,  0.0,  1.0,
+  for (u32 i = 0; i < 20; i++) {
+    vec3 vert = state.bm.positions[i];
+    printf("Vertex %d: (%f, %f, %f)\n", i, vert.X, vert.Y, vert.Z);
+  }
+  // CPU skinning bufs
+  //   sg_buffer skinnedposbuf = sg_make_buffer(&(sg_buffer_desc){
+  //       .data = (sg_range){state.bm.skinned_positions,
+  //       state.bm.vertices_len}, .label = "model-skinned-pos"});
+  //   sg_buffer skinnednormbuf = sg_make_buffer(&(sg_buffer_desc){
+  //       .data = (sg_range){state.bm.skinned_normals, state.bm.vertices_len},
+  //       .label = "model-skinned-norm"});
 
-      -1.0, -1.0, -1.0, 0.0,  0.0,  1.0,  1.0,  -1.0, 1.0,  -1.0,
-      0.0,  0.0,  1.0,  1.0,  -1.0, 1.0,  1.0,  0.0,  0.0,  1.0,
-      1.0,  -1.0, -1.0, 1.0,  0.0,  0.0,  1.0,  1.0,
-
-      1.0,  -1.0, -1.0, 1.0,  0.5,  0.0,  1.0,  1.0,  1.0,  -1.0,
-      1.0,  0.5,  0.0,  1.0,  1.0,  1.0,  1.0,  1.0,  0.5,  0.0,
-      1.0,  1.0,  -1.0, 1.0,  1.0,  0.5,  0.0,  1.0,
-
-      -1.0, -1.0, -1.0, 0.0,  0.5,  1.0,  1.0,  -1.0, -1.0, 1.0,
-      0.0,  0.5,  1.0,  1.0,  1.0,  -1.0, 1.0,  0.0,  0.5,  1.0,
-      1.0,  1.0,  -1.0, -1.0, 0.0,  0.5,  1.0,  1.0,
-
-      -1.0, 1.0,  -1.0, 1.0,  0.0,  0.5,  1.0,  -1.0, 1.0,  1.0,
-      1.0,  0.0,  0.5,  1.0,  1.0,  1.0,  1.0,  1.0,  0.0,  0.5,
-      1.0,  1.0,  1.0,  -1.0, 1.0,  0.0,  0.5,  1.0};
-
-  sg_buffer vbuf = sg_make_buffer(
-      &(sg_buffer_desc){.data = SG_RANGE(vertices), .label = "cube-vertices"});
-
-  /* create an index buffer for the cube */
-  uint16_t indices[] = {0,  1,  2,  0,  2,  3,  6,  5,  4,  7,  6,  4,
-                        8,  9,  10, 8,  10, 11, 14, 13, 12, 15, 14, 12,
-                        16, 17, 18, 16, 18, 19, 22, 21, 20, 23, 22, 20};
-  sg_buffer ibuf =
-      sg_make_buffer(&(sg_buffer_desc){.type = SG_BUFFERTYPE_INDEXBUFFER,
-                                       .data = SG_RANGE(indices),
-                                       .label = "cube-indices"});
-
-  /* create shader */
-  sg_shader shd = sg_make_shader(cube_shader_desc(sg_query_backend()));
+  sg_buffer ibuf = sg_make_buffer(
+      &(sg_buffer_desc){.type = SG_BUFFERTYPE_INDEXBUFFER,
+                        .data = SG_RANGE_ARR(u32, state.bm.indices),
+                        .label = "model-indices"});
 
   /* create pipeline object */
   state.pip = sg_make_pipeline(&(sg_pipeline_desc){
       .layout =
-          {/* test to provide buffer stride, but no attr offsets */
-           .buffers[0].stride = 28,
-           .attrs = {[ATTR_vs_position].format = SG_VERTEXFORMAT_FLOAT3,
-                     [ATTR_vs_color0].format = SG_VERTEXFORMAT_FLOAT4}},
+          {
+              /* test to provide buffer stride, but no attr offsets */
+              // pos
+              .buffers[0].stride = sizeof(vec3),
+              .attrs[0] = {.format = SG_VERTEXFORMAT_FLOAT3, .buffer_index = 0},
+              // norms
+              .buffers[1].stride = sizeof(vec3),
+              .attrs[1] = {.format = SG_VERTEXFORMAT_FLOAT3, .buffer_index = 1},
+              // texcoords
+              .buffers[2].stride = sizeof(vec2),
+              .attrs[2] = {.format = SG_VERTEXFORMAT_FLOAT2, .buffer_index = 2},
+              // weights
+              .buffers[3].stride = sizeof(vec4),
+              .attrs[3] = {.format = SG_VERTEXFORMAT_FLOAT4, .buffer_index = 3},
+              // influences
+              // .buffers[4].stride = sizeof(ivec4),
+              .buffers[4].stride = sizeof(shortvec4),
+              .attrs[4] = {.format = SG_VERTEXFORMAT_SHORT4, .buffer_index = 4},
+          },
       .shader = shd,
-      .index_type = SG_INDEXTYPE_UINT16,
+      .index_type = SG_INDEXTYPE_UINT32,
       .face_winding = SG_FACEWINDING_CCW,
       .cull_mode = SG_CULLMODE_BACK,
+      // .face_winding = SG_FACEWINDING_CW,
+      // .cull_mode = SG_CULLMODE_FRONT,
       .depth =
           {
               .write_enabled = true,
@@ -875,16 +1006,41 @@ void init(void) {
       .label = "cube-pipeline"});
 
   /* setup resource bindings */
-  state.bind = (sg_bindings){.vertex_buffers[0] = vbuf, .index_buffer = ibuf};
+  state.bind = (sg_bindings){.vertex_buffers[0] = vbuf,
+                             .vertex_buffers[1] = normbuf,
+                             .vertex_buffers[2] = txbuf,
+                             .vertex_buffers[3] = weightbuf,
+                             .vertex_buffers[4] = influencebuf,
+                             .index_buffer = ibuf};
+
+  // create a checkerboard texture
+  uint32_t pixels[4 * 4] = {
+      0xFFFFFFFF, 0xFF000000, 0xFFFFFFFF, 0xFF000000, 0xFF000000, 0xFFFFFFFF,
+      0xFF000000, 0xFFFFFFFF, 0xFFFFFFFF, 0xFF000000, 0xFFFFFFFF, 0xFF000000,
+      0xFF000000, 0xFFFFFFFF, 0xFF000000, 0xFFFFFFFF,
+  };
+
+  state.bind.fs.images[SLOT_tex] =
+      sg_make_image(&(sg_image_desc){.width = 4,
+                                     .height = 4,
+                                     .data.subimage[0][0] = SG_RANGE(pixels),
+                                     .label = "cube-texture"});
+
+  // create a sampler object with default attributes
+  state.bind.fs.samplers[SLOT_smp] = sg_make_sampler(&(sg_sampler_desc){0});
+
+  set_vs_params();
 }
 
 void frame(void) {
-  /* NOTE: the vs_params_t struct has been code-generated by the
-   * shader-code-gen
-   */
-  vs_params_t vs_params;
   const float w = sapp_widthf();
   const float h = sapp_heightf();
+
+  fs_params_t fs_params;
+  fs_params.light[0] = 1.0;
+  fs_params.light[1] = 1.0;
+  fs_params.light[2] = 1.0;
+
   //   const float t = (float)(sapp_frame_duration() * 60.0);
   const float t = (float)(sapp_frame_duration());
 
@@ -892,15 +1048,15 @@ void frame(void) {
   HMM_Mat4 view = HMM_LookAt_LH((HMM_Vec3){.X = 0.0f, .Y = 1.5f, .Z = 6.0f},
                                 (HMM_Vec3){.X = 0.0f, .Y = 0.0f, .Z = 0.0f},
                                 (HMM_Vec3){.X = 0.0f, .Y = 1.0f, .Z = 0.0f});
-  HMM_Mat4 view_proj = HMM_MulM4(proj, view);
-  state.rx += 1.0f * t;
-  state.ry += 2.0f * t;
-  HMM_Mat4 rxm = HMM_Rotate_LH(state.rx, (HMM_Vec3){{1.0f, 0.0f, 0.0f}});
+  state.ry += 1.0f * t;
   HMM_Mat4 rym = HMM_Rotate_LH(state.ry, (HMM_Vec3){{0.0f, 1.0f, 0.0f}});
-  HMM_Mat4 model = HMM_MulM4(rxm, rym);
-  //   HMM_Mat4 model = HMM_M4D(1.0);
-  vs_params.mvp = HMM_MulM4(view_proj, model);
-  //   vs_params.mvp = HMM_MulM4(model, view_proj);
+  HMM_Mat4 model = HMM_MulM4(HMM_Translate(HMM_V3(-0.0, 0.0, 10.5)),
+                             HMM_MulM4(rym, HMM_Scale(HMM_V3(0.01, .01, .01))));
+  // HMM_MulM4(HMM_MulM4(rxm, rym), HMM_Scale(HMM_V3(1.01, 1.01, 1.01))));
+
+  state.vs_params.model = model;
+  state.vs_params.view = view;
+  state.vs_params.projection = proj;
 
   sg_pass_action pass_action = {
       .colors[0] = {.load_action = SG_LOADACTION_CLEAR,
@@ -908,8 +1064,12 @@ void frame(void) {
   sg_begin_default_pass(&pass_action, (int)w, (int)h);
   sg_apply_pipeline(state.pip);
   sg_apply_bindings(&state.bind);
-  sg_apply_uniforms(SG_SHADERSTAGE_VS, SLOT_vs_params, &SG_RANGE(vs_params));
-  sg_draw(0, 36, 1);
+  sg_apply_uniforms(SG_SHADERSTAGE_VS, SLOT_vs_params,
+                    &SG_RANGE(state.vs_params));
+  sg_apply_uniforms(SG_SHADERSTAGE_FS, SLOT_fs_params, &SG_RANGE(fs_params));
+  // SG_PRIMITIVETYPE_TRIANGLES
+  // sg_draw(0, state.bm.indices.len, state.bm.vertices_len / 3);
+  sg_draw(0, state.bm.vertices_len * 3, 1);
   sg_end_pass();
   sg_commit();
 }
