@@ -18,8 +18,7 @@ all: main
 # 	$(CC) $(C_FLAGS) $(LD_FLAGS) -ObjC -F$(MACOS_FRAMEWORK_PATH) -o $@ $< $(MACOS_FRAMEWORKS)
 
 $(OUT_DIR)/main: src/main.c $(OUT_DIR)/common.o $(OUT_DIR)/arena.o src/*.c src/**/*.h
-	# $(CC) $(C_FLAGS) $(LD_FLAGS) -ObjC -F$(MACOS_FRAMEWORK_PATH) -o $@ $< $(MACOS_FRAMEWORKS)
-	$(CC) $(C_FLAGS) $(LD_FLAGS) -ObjC -F$(MACOS_FRAMEWORK_PATH) -o $@ $< $(MACOS_FRAMEWORKS)
+	$(CC) $(C_FLAGS) $(LD_FLAGS) -ObjC -F$(MACOS_FRAMEWORK_PATH) -o $@ $< $(OUT_DIR)/common.o $(OUT_DIR)/arena.o $(MACOS_FRAMEWORKS)
 
 main: $(OUT_DIR)/main
 

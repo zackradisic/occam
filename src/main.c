@@ -20,13 +20,19 @@
 #include <cgltf.h>
 #include "array.h"
 
+#if defined(SOKOL_GLCORE33) || defined(SOKOL_GLES2) || defined(SOKOL_GLES3)
+#define USING_OPENGL_BACKEND 1
+#else
+#define USING_OPENGL_BACKEND 0
+#endif
+
 ASSUME_NONNULL_BEGIN
 
 #define QUAT_EPSILON 0.000001f
 #define VEC3_EPSILON 0.000001f
 
 #define SG_RANGE_ARR(T, a)                                                     \
-  (sg_range) { .ptr = a.ptr, .size = sizeof(T) * a.len }
+  (sg_range) { .ptr = (a).ptr, .size = sizeof(T) * (a).len }
 
 typedef HMM_Vec2 vec2;
 typedef HMM_Vec3 vec3;
@@ -218,9 +224,12 @@ Transform transform_from_mat4(const mat4 *m) {
   mat4 scale_skew_mat = HMM_MulM4(rot_scale_mat, inv_rot_mat);
 
   out.scale = (vec3){
-      scale_skew_mat.Elements[0][0],
-      scale_skew_mat.Elements[1][1],
-      scale_skew_mat.Elements[2][2],
+      // scale_skew_mat.Elements[0][0],
+      // scale_skew_mat.Elements[1][1],
+      // scale_skew_mat.Elements[2][2],
+      scale_skew_mat.Columns[0].X,
+      scale_skew_mat.Columns[1].Y,
+      scale_skew_mat.Columns[2].Z,
   };
 
   return out;
@@ -413,6 +422,9 @@ Pose pose_load_bind_pose_from_cgltf(cgltf_data *data, Pose rest_pose) {
 // When passing to GPU, pose needs to be converted to a linear array of
 // matrices
 void pose_get_matrix_palette(const Pose *pose, mat4array_t *matrices) {
+  safecheckf(matrices->len == 0, "matrices len is 0 (got %zu)\n",
+             matrices->len);
+
   if (matrices->cap != pose->len) {
     array_reserve(mat4, matrices, pose->len);
   }
@@ -712,9 +724,10 @@ bonemesh_array_t bonemesh_load_meshes(cgltf_data *data) {
         u32 index_count = primitive->indices->count;
         array_reserve(u32, &mesh.indices, index_count);
         for (u32 k = 0; k < index_count; k++) {
-          mesh.indices.ptr[k] =
-              (u32)cgltf_accessor_read_index(primitive->indices, k);
+          array_push(u32, &mesh.indices,
+                     (u32)cgltf_accessor_read_index(primitive->indices, k));
         }
+        safecheck(mesh.indices.len == index_count);
       }
 
       array_push(BoneMesh, &result, mesh);
@@ -779,8 +792,8 @@ void cgltf_get_scalar_values(floatarray_t *out, u32 comp_count,
   usize len = in_accessor->count * comp_count;
   array_reserve(float, out, len);
   for (cgltf_size i = 0; i < in_accessor->count; i++) {
-    cgltf_accessor_read_float(in_accessor, i, &out->ptr[i * comp_count],
-                              comp_count);
+    safecheck(cgltf_accessor_read_float(in_accessor, i,
+                                        &out->ptr[i * comp_count], comp_count));
   }
   out->len = len;
 }
@@ -928,7 +941,7 @@ void init(void) {
   printf("INDICES LEN: %zu\n", state.bm.indices.len);
 
 #ifdef CPU_SKIN
-  bonemesh_cpu_skin(&state.bm, &state.sk, &state.animated_pose);
+  bonemesh_cpu_skin1(&state.bm, &state.sk, &state.animated_pose);
 #endif
 
 /* create shader */
@@ -942,7 +955,6 @@ void init(void) {
 
   /* __dbgui_setup(sapp_sample_count()); */
 
-  // TODO: sizeof on the length
   sg_buffer vbuf = sg_make_buffer(
       &(sg_buffer_desc){.data =
 #ifdef CPU_SKIN
@@ -1061,8 +1073,9 @@ void frame(void) {
                                 (HMM_Vec3){.X = 0.0f, .Y = 1.0f, .Z = 0.0f});
   state.ry += 1.0f * t;
   HMM_Mat4 rym = HMM_Rotate_LH(state.ry, (HMM_Vec3){{0.0f, 1.0f, 0.0f}});
-  HMM_Mat4 model = HMM_MulM4(HMM_Translate(HMM_V3(-0.0, 0.0, 10.5)),
-                             HMM_MulM4(rym, HMM_Scale(HMM_V3(0.01, .01, .01))));
+  HMM_Mat4 model =
+      HMM_MulM4(HMM_Translate(HMM_V3(-0.0, 0.0, 10.5)),
+                HMM_MulM4(rym, HMM_Scale(HMM_V3(1.01, 1.01, 1.01))));
   // HMM_MulM4(HMM_MulM4(rxm, rym), HMM_Scale(HMM_V3(1.01, 1.01, 1.01))));
 
   state.vs_params.model = model;
@@ -1081,6 +1094,8 @@ void frame(void) {
   // SG_PRIMITIVETYPE_TRIANGLES
   // sg_draw(0, state.bm.indices.len, state.bm.vertices_len / 3);
   // sg_draw(0, state.bm.vertices_len * 3, 1);
+  // sg_draw(0, state.bm.indices.len, 1);
+  // sg_draw(0, 3, state.bm.vertices_len / 3);
   sg_draw(0, state.bm.indices.len, 1);
   sg_end_pass();
   sg_commit();

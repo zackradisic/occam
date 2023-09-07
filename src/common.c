@@ -1,10 +1,8 @@
 #include "common.h"
 
-#if NN_SAFE
 #include <stdarg.h>
 #include <stdio.h>
 #include <unistd.h>
-#endif
 
 // https://stackoverflow.com/a/253874
 int float_eq(float a, float b) {
@@ -22,7 +20,6 @@ int float_eq(float a, float b) {
 #include <execinfo.h>
 #endif
 
-#if NN_SAFE
 // From:
 // https://github.com/rsms/compis/blob/3946ed5c1da01addf5b07faa872cc6463df2521d/src/panic.c#L22
 void _panic(const char *file, int line, const char *fun, const char *fmt, ...) {
@@ -62,4 +59,3 @@ void _panic(const char *file, int line, const char *fun, const char *fmt, ...) {
 
   abort();
 }
-#endif

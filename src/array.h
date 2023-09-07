@@ -85,10 +85,12 @@ bool array_grow(array_t *a, usize elemsize, usize extracap) {
 }
 
 void _array_reserve(array_t *arr, usize elem_size, usize amount) {
-  arr->len += amount;
-  if (arr->len > arr->cap) {
-    array_grow(arr, elem_size, arr->len);
-  }
+  usize avail = arr->cap - arr->len;
+  if (amount <= avail)
+    return;
+
+  usize amount_to_grow = amount - avail;
+  array_grow(arr, elem_size, amount_to_grow);
 }
 
 void _array_shrink_to_fit(array_t *arr) {
@@ -100,8 +102,8 @@ void _array_shrink_to_fit(array_t *arr) {
 }
 
 #define array_empty(T) ((T){.ptr = NULL, .len = 0, .cap = 0})
-#define array_init(T, a, cap) _array_init((array_t *)a, cap, sizeof(T))
-#define array_shrink_to_fit(a) _array_shrink_to_fit((array_t *)a)
+#define array_init(T, a, cap) _array_init((array_t *)(a), (cap), sizeof(T))
+#define array_shrink_to_fit(a) _array_shrink_to_fit((array_t *)(a))
 #define array_free(a) _array_free((array_t *)a)
 
 #define array_push(T, a, val)                                                  \
