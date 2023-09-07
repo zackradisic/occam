@@ -1,12 +1,18 @@
 // For wasm i think turn off?
 // #define HANDMADE_MATH_NO_SSE
 
+#define CPU_SKIN
+
 #define SOKOL_IMPL
 #include <HandmadeMath.h>
 #include "common.h"
 #include <sokol/sokol_glue.h>
 #include "sokol.h"
+#ifdef CPU_SKIN
+#include "shaders/bonemesh_cpu.glsl.h"
+#else
 #include "shaders/bonemesh.glsl.h"
+#endif
 #include "stdio.h"
 #include "arena.h"
 #include <sokol/sokol_glue.h>
@@ -97,8 +103,7 @@ vec3 quat_mul_v3(quat q, vec3 v) {
   //       cross(q.vector, v) * 2.0f * q.scalar;
   vec3 out;
 
-  out = HMM_MulV3F(q.XYZ, 2.0);
-  out = HMM_MulV3F(out, HMM_DotV3(q.XYZ, v));
+  out = HMM_MulV3F(HMM_MulV3F(q.XYZ, 2.0), HMM_DotV3(q.XYZ, v));
   out = HMM_AddV3(out, HMM_MulV3F(v, q.W * q.W - HMM_DotQ(q, q)));
   out = HMM_AddV3(out, HMM_MulV3F(HMM_MulV3F(HMM_Cross(q.XYZ, v), 2.0), q.W));
   return out;
@@ -865,10 +870,14 @@ void set_vs_params() {
   vs_params.model = model;
   vs_params.view = view;
   vs_params.projection = proj;
+
+#ifndef CPU_SKIN
+  pose_get_matrix_palette(&state.animated_pose, &state.pose_palette);
   memcpy(&vs_params.pose, state.pose_palette.ptr,
          sizeof(mat4) * state.pose_palette.len);
   memcpy(&vs_params.invBindPose, state.inv_bind_pose.ptr,
          sizeof(mat4) * state.inv_bind_pose.len);
+#endif
 
   state.vs_params = vs_params;
 }
@@ -905,15 +914,10 @@ void init(void) {
   printf("Validated glTF\n");
 
   bonemesh_array_t meshes = bonemesh_load_meshes(data);
-  printf("Loaded meshes\n");
   state.bm = meshes.ptr[0];
   state.sk = skeleton_load(data);
-  printf("Loaded skeleton\n");
   state.animated_pose = state.sk.rest_pose;
   state.pose_palette = array_empty(mat4array_t);
-  printf("Getting matrix palette %d\n", state.animated_pose.len);
-  pose_get_matrix_palette(&state.animated_pose, &state.pose_palette);
-  printf("Got matrix palette\n");
   state.inv_bind_pose = (mat4array_t){
       .ptr = state.sk.inv_bind_pose,
       .len = state.sk.joints_len,
@@ -923,24 +927,43 @@ void init(void) {
   printf("VERTICES LEN: %d\n", state.bm.vertices_len);
   printf("INDICES LEN: %zu\n", state.bm.indices.len);
 
-  /* create shader */
+#ifdef CPU_SKIN
+  bonemesh_cpu_skin(&state.bm, &state.sk, &state.animated_pose);
+#endif
+
+/* create shader */
+#ifdef CPU_SKIN
+  sg_shader shd = sg_make_shader(bonemesh_cpu_shader_desc(sg_query_backend()));
+#else
   sg_shader shd = sg_make_shader(bonemesh_shader_desc(sg_query_backend()));
+#endif
 
   // BoneMesh *mesh = &meshes.ptr[0];
 
   /* __dbgui_setup(sapp_sample_count()); */
 
   // TODO: sizeof on the length
-  sg_buffer vbuf = sg_make_buffer(&(sg_buffer_desc){
-      .data =
-          (sg_range){state.bm.positions, sizeof(vec3) * state.bm.vertices_len},
-      .label = "model-vertices"});
+  sg_buffer vbuf = sg_make_buffer(
+      &(sg_buffer_desc){.data =
+#ifdef CPU_SKIN
+                            (sg_range){state.bm.skinned_positions,
+                                       sizeof(vec3) * state.bm.vertices_len},
+#else
+                            (sg_range){state.bm.positions,
+                                       sizeof(vec3) * state.bm.vertices_len},
+#endif
+                        .label = "model-vertices"});
   sg_buffer txbuf = sg_make_buffer(&(sg_buffer_desc){
       .data =
           (sg_range){state.bm.texcoords, sizeof(vec2) * state.bm.vertices_len},
       .label = "model-texcoords"});
   sg_buffer normbuf = sg_make_buffer(&(sg_buffer_desc){
+#ifdef CPU_SKIN
+      .data = (sg_range){state.bm.skinned_normals,
+                         sizeof(vec3) * state.bm.vertices_len},
+#else
       .data = (sg_range){state.bm.norms, sizeof(vec3) * state.bm.vertices_len},
+#endif
       .label = "model-norm"});
   sg_buffer weightbuf = sg_make_buffer(&(sg_buffer_desc){
       .data =
@@ -952,18 +975,6 @@ void init(void) {
       .data = (sg_range){state.bm.influences,
                          sizeof(shortvec4) * state.bm.vertices_len},
       .label = "model-influences"});
-
-  for (u32 i = 0; i < 20; i++) {
-    vec3 vert = state.bm.positions[i];
-    printf("Vertex %d: (%f, %f, %f)\n", i, vert.X, vert.Y, vert.Z);
-  }
-  // CPU skinning bufs
-  //   sg_buffer skinnedposbuf = sg_make_buffer(&(sg_buffer_desc){
-  //       .data = (sg_range){state.bm.skinned_positions,
-  //       state.bm.vertices_len}, .label = "model-skinned-pos"});
-  //   sg_buffer skinnednormbuf = sg_make_buffer(&(sg_buffer_desc){
-  //       .data = (sg_range){state.bm.skinned_normals, state.bm.vertices_len},
-  //       .label = "model-skinned-norm"});
 
   sg_buffer ibuf = sg_make_buffer(
       &(sg_buffer_desc){.type = SG_BUFFERTYPE_INDEXBUFFER,
@@ -1069,7 +1080,8 @@ void frame(void) {
   sg_apply_uniforms(SG_SHADERSTAGE_FS, SLOT_fs_params, &SG_RANGE(fs_params));
   // SG_PRIMITIVETYPE_TRIANGLES
   // sg_draw(0, state.bm.indices.len, state.bm.vertices_len / 3);
-  sg_draw(0, state.bm.vertices_len * 3, 1);
+  // sg_draw(0, state.bm.vertices_len * 3, 1);
+  sg_draw(0, state.bm.indices.len, 1);
   sg_end_pass();
   sg_commit();
 }
