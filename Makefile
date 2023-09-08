@@ -17,8 +17,8 @@ all: main
 # 	# $(CC) $(C_FLAGS) $(LD_FLAGS) -ObjC -F$(MACOS_FRAMEWORK_PATH) -o $@ $< $(MACOS_FRAMEWORKS)
 # 	$(CC) $(C_FLAGS) $(LD_FLAGS) -ObjC -F$(MACOS_FRAMEWORK_PATH) -o $@ $< $(MACOS_FRAMEWORKS)
 
-$(OUT_DIR)/main: src/main.c $(OUT_DIR)/common.o $(OUT_DIR)/arena.o src/*.c src/**/*.h
-	$(CC) $(C_FLAGS) $(LD_FLAGS) -ObjC -F$(MACOS_FRAMEWORK_PATH) -o $@ $< $(OUT_DIR)/common.o $(OUT_DIR)/arena.o $(MACOS_FRAMEWORKS)
+$(OUT_DIR)/main: src/main.c $(OUT_DIR)/common.o $(OUT_DIR)/arena.o src/*.c src/*.h src/**/*.h
+	$(CC) $(C_FLAGS) $(LD_FLAGS) -ObjC -F$(MACOS_FRAMEWORK_PATH) -o $@ $< $(OUT_DIR)/common.o $(OUT_DIR)/arena.o $(MACOS_FRAMEWORKS) -framework OpenGL
 
 main: $(OUT_DIR)/main
 
@@ -27,6 +27,12 @@ $(OUT_DIR)/common.o: src/common.c src/common.h
 
 $(OUT_DIR)/arena.o: src/arena.c src/arena.h
 	$(CC) $(C_FLAGS) $(LD_FLAGS) -o $@ -c $<
+
+src/shaders/bonemesh.glsl.h: src/shaders/bonemesh.glsl
+	cd /Users/zackradisic/Code/sokol-tools-workspace/sokol-tools; ./fips run sokol-shdc -- -i /Users/zackradisic/Code/occam/$< -o /Users/zackradisic/Code/occam/$@ -l glsl330:metal_macos:hlsl4 -f sokol
+
+src/shaders/bonemesh_cpu.glsl.h: src/shaders/bonemesh_cpu.glsl
+	cd /Users/zackradisic/Code/sokol-tools-workspace/sokol-tools; ./fips run sokol-shdc -- -i /Users/zackradisic/Code/occam/$< -o /Users/zackradisic/Code/occam/$@ -l glsl330:metal_macos:hlsl4 -f sokol
 
 # $(OUT_DIR)/sokol.o: src/sokol.h 
 # 	$(CC) $(LD_FLAGS) -ObjC -o $@ -c $<

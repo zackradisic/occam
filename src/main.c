@@ -1,18 +1,20 @@
 // For wasm i think turn off?
-// #define HANDMADE_MATH_NO_SSE
+#define HANDMADE_MATH_NO_SSE
 
-#define CPU_SKIN
+// #define CPU_SKIN
 
 #define SOKOL_IMPL
 #include <HandmadeMath.h>
 #include "common.h"
 #include <sokol/sokol_glue.h>
 #include "sokol.h"
+
 #ifdef CPU_SKIN
 #include "shaders/bonemesh_cpu.glsl.h"
 #else
 #include "shaders/bonemesh.glsl.h"
 #endif
+
 #include "stdio.h"
 #include "arena.h"
 #include <sokol/sokol_glue.h>
@@ -21,10 +23,48 @@
 #include "array.h"
 
 #if defined(SOKOL_GLCORE33) || defined(SOKOL_GLES2) || defined(SOKOL_GLES3)
-#define USING_OPENGL_BACKEND 1
+#define USING_OPENGL_BACKEND
 #else
-#define USING_OPENGL_BACKEND 0
 #endif
+
+#if defined(USING_OPENGL_BACKEND)
+#else
+#define LEFT_HANDED
+#endif
+
+// Coordinate-system-handedness generic
+static inline HMM_Quat HMM_M4ToQ(HMM_Mat4 M) {
+#ifdef LEFT_HANDED
+  return HMM_M4ToQ_LH(M);
+#else
+  return HMM_M4ToQ_RH(M);
+#endif
+}
+
+static inline HMM_Mat4 HMM_Perspective(float FOV, float AspectRatio, float Near,
+                                       float Far) {
+#ifdef LEFT_HANDED
+  return HMM_Perspective_LH_ZO(FOV, AspectRatio, Near, Far);
+#else
+  return HMM_Perspective_RH_NO(FOV, AspectRatio, Near, Far);
+#endif
+}
+
+static inline HMM_Mat4 HMM_Rotate(float Angle, HMM_Vec3 Axis) {
+#ifdef LEFT_HANDED
+  return HMM_Rotate_LH(Angle, Axis);
+#else
+  return HMM_Rotate_RH(Angle, Axis);
+#endif
+}
+
+static inline HMM_Mat4 HMM_LookAt(HMM_Vec3 Eye, HMM_Vec3 Center, HMM_Vec3 Up) {
+#ifdef LEFT_HANDED
+  return HMM_LookAt_LH(Eye, Center, Up);
+#else
+  return HMM_LookAt_RH(Eye, Center, Up);
+#endif
+}
 
 ASSUME_NONNULL_BEGIN
 
@@ -38,6 +78,7 @@ typedef HMM_Vec2 vec2;
 typedef HMM_Vec3 vec3;
 typedef HMM_Vec4 vec4;
 typedef HMM_Quat quat;
+typedef HMM_Mat3 mat3;
 typedef HMM_Mat4 mat4;
 
 typedef array_type(mat4) mat4array_t;
@@ -70,24 +111,24 @@ typedef struct {
   int influences[4];
 } Vertex;
 
-// typedef union {
-//   struct {
-//     int x, y, z, w;
-//   };
-
-//   int v[4];
-
-// } ivec4;
-
 typedef union {
   struct {
-    u16 x, y, z, w;
+    u8 x, y, z, w;
   };
 
-  u16 v[4];
+  u8 v[4];
 
-} shortvec4;
+} u8vec4;
 
+static inline vec3 vec3_default() { return (vec3){0, 0, 0}; }
+static inline vec4 vec4_default() { return (vec4){0, 0, 0, 0}; }
+
+static inline mat4 mat4_default() {
+  return (mat4){.Elements = {{1.0f, 0.0f, 0.0f, 0.0f},
+                             {0.0f, 1.0f, 0.0f, 0.0f},
+                             {0.0f, 0.0f, 1.0f, 0.0f},
+                             {0.0f, 0.0f, 0.0f, 1.0f}}};
+}
 mat4 mat4_new(float _00, float _01, float _02, float _03, float _10, float _11,
               float _12, float _13, float _20, float _21, float _22, float _23,
               float _30, float _31, float _32, float _33) {
@@ -103,6 +144,33 @@ mat4 mat4_new_from_arr(float *arr) {
                   arr[14], arr[15]);
 }
 
+#if 0
+vec3 quat_mul_v3(quat q, vec3 v) {
+  // 	return    q.vector * 2.0f * dot(q.vector, v) +
+  //   v *(q.scalar * q.scalar - dot(q.vector, q.vector)) +
+  //       cross(q.vector, v) * 2.0f * q.scalar;
+  vec3 out;
+
+  // out = HMM_MulV3F(HMM_MulV3F(q.XYZ, 2.0), HMM_DotV3(q.XYZ, v));
+  // out = HMM_AddV3(out, HMM_MulV3F(v, q.W * q.W - HMM_DotV3(q.XYZ, q.XYZ)));
+  // out = HMM_AddV3(out, HMM_MulV3F(HMM_MulV3F(HMM_Cross(q.XYZ, v), 2.0),
+  // q.W));
+
+  // t = 2.0f * dot(q.vector, v)
+  float t = 2.0f * HMM_DotV3(q.XYZ, v);
+
+  // p = v * (q.scalar^2 - dot(q.vector, q.vector))
+  vec3 p = HMM_MulV3F(v, q.W * q.W - HMM_DotV3(q.XYZ, q.XYZ));
+
+  // r = 2.0f * q.scalar * cross(q.vector, v)
+  vec3 r = HMM_MulV3F(HMM_Cross(q.XYZ, v), 2.0f * q.W);
+
+  // out = t * q.vector + p + r
+  out = HMM_AddV3(HMM_AddV3(HMM_MulV3F(q.XYZ, t), p), r);
+
+  return out;
+}
+#else
 vec3 quat_mul_v3(quat q, vec3 v) {
   // 	return    q.vector * 2.0f * dot(q.vector, v) +
   //   v *(q.scalar * q.scalar - dot(q.vector, q.vector)) +
@@ -110,10 +178,11 @@ vec3 quat_mul_v3(quat q, vec3 v) {
   vec3 out;
 
   out = HMM_MulV3F(HMM_MulV3F(q.XYZ, 2.0), HMM_DotV3(q.XYZ, v));
-  out = HMM_AddV3(out, HMM_MulV3F(v, q.W * q.W - HMM_DotQ(q, q)));
+  out = HMM_AddV3(out, HMM_MulV3F(v, q.W * q.W - HMM_DotV3(q.XYZ, q.XYZ)));
   out = HMM_AddV3(out, HMM_MulV3F(HMM_MulV3F(HMM_Cross(q.XYZ, v), 2.0), q.W));
   return out;
 }
+#endif
 
 bool quat_eq(quat left, quat right) {
   return (fabsf(left.X - right.X) <= QUAT_EPSILON &&
@@ -156,9 +225,17 @@ typedef struct {
 
 Transform cgltf_get_local_transform(cgltf_node *n);
 
+Transform transform_default() {
+  Transform out;
+  out.position = HMM_V3(0, 0, 0);
+  out.rotation = HMM_Q(0, 0, 0, 1);
+  out.scale = HMM_V3(1, 1, 1);
+  return out;
+}
+
 // Order is right -> left
 Transform transform_combine(Transform a, Transform b) {
-  Transform out;
+  Transform out = transform_default();
   out.scale = HMM_MulV3(a.scale, b.scale);
   out.rotation = HMM_MulQ(b.rotation, a.rotation);
   out.position = quat_mul_v3(a.rotation, HMM_MulV3(a.scale, b.position));
@@ -167,7 +244,7 @@ Transform transform_combine(Transform a, Transform b) {
 }
 
 Transform transform_inverse(Transform t) {
-  Transform inv;
+  Transform inv = transform_default();
 
   inv.rotation = HMM_InvQ(t.rotation);
 
@@ -188,31 +265,24 @@ bool transform_eq(const Transform *a, const Transform *b) {
 }
 
 vec3 transform_point(const Transform *t, vec3 p) {
-  vec3 out;
+  vec3 out = vec3_default();
   out = quat_mul_v3(t->rotation, HMM_MulV3(t->scale, p));
   out = HMM_AddV3(t->position, out);
   return out;
 }
 
 vec3 transform_vector(const Transform *t, vec3 v) {
-  vec3 out;
+  vec3 out = vec3_default();
   out = quat_mul_v3(t->rotation, HMM_MulV3(t->scale, v));
   return out;
 }
 
-Transform transform_default() {
-  Transform out;
-  out.position = HMM_V3(0, 0, 0);
-  out.rotation = HMM_Q(0, 0, 0, 1);
-  out.scale = HMM_V3(1, 1, 1);
-  return out;
-}
-
+#if 0
 Transform transform_from_mat4(const mat4 *m) {
-  Transform out;
+  Transform out = transform_default();
 
   out.position = HMM_V3(m->Columns[3].X, m->Columns[3].Y, m->Columns[3].Z);
-  out.rotation = HMM_M4ToQ_LH(*m);
+  out.rotation = HMM_M4ToQ(*m);
 
   mat4 rot_scale_mat =
       mat4_new(m->Columns[0].X, m->Columns[0].Y, m->Columns[0].Z, 0, // col 1
@@ -234,7 +304,105 @@ Transform transform_from_mat4(const mat4 *m) {
 
   return out;
 }
+#else
+// float signum(float x) {
+//   if (x > 0.0f)
+//     return 1;
+//   if (x < 0.0f)
+//     return -1;
+//   return 0;
+// }
+float signum(float x) {
+  float epsilon = 1e-6; // Choose a small value that suits your needs
+  if (x > epsilon)
+    return 1.0f;
+  if (x < -epsilon)
+    return -1.0f;
+  return 0.0f;
+}
 
+float mat3_trace(const mat3 *m) {
+  return m->Columns[0].X + m->Columns[1].Y + m->Columns[2].Z;
+}
+
+quat mat3_to_quat(mat3 m) {
+  float trace = mat3_trace(&m);
+  if (trace >= 0.0f) {
+    float s = sqrtf(1.0f + trace) * 2.0f;
+    float invS = 1.0f / s;
+    float x = (m.Columns[2].Y - m.Columns[1].Z) * invS;
+    float y = (m.Columns[0].Z - m.Columns[2].X) * invS;
+    float z = (m.Columns[1].X - m.Columns[0].Y) * invS;
+    float w = 0.25f * s;
+    return HMM_Q(x, y, z, w);
+  } else if (m.Columns[0].X > m.Columns[1].Y &&
+             m.Columns[0].X > m.Columns[2].Z) {
+    float s =
+        sqrtf(1.0f + m.Columns[0].X - m.Columns[1].Y - m.Columns[2].Z) * 2.0f;
+    float invS = 1.0f / s;
+    float x = 0.25f * s;
+    float y = (m.Columns[0].Y + m.Columns[1].X) * invS;
+    float z = (m.Columns[0].Z + m.Columns[2].X) * invS;
+    float w = (m.Columns[2].Y - m.Columns[1].Z) * invS;
+    return HMM_Q(x, y, z, w);
+  } else if (m.Columns[1].Y > m.Columns[2].Z) {
+    float s =
+        sqrtf(1.0f + m.Columns[1].Y - m.Columns[0].X - m.Columns[2].Z) * 2.0f;
+    float invS = 1.0f / s;
+    float x = (m.Columns[0].Y + m.Columns[1].X) * invS;
+    float y = 0.25f * s;
+    float z = (m.Columns[1].Z + m.Columns[2].Y) * invS;
+    float w = (m.Columns[0].Z - m.Columns[2].X) * invS;
+    return HMM_Q(x, y, z, w);
+  } else {
+    float s =
+        sqrtf(1.0f + m.Columns[2].Z - m.Columns[0].X - m.Columns[1].Y) * 2.0f;
+    float invS = 1.0f / s;
+    float x = (m.Columns[0].Z + m.Columns[2].X) * invS;
+    float y = (m.Columns[1].Z + m.Columns[2].Y) * invS;
+    float z = 0.25f * s;
+    float w = (m.Columns[1].X - m.Columns[0].Y) * invS;
+    return HMM_Q(x, y, z, w);
+  }
+}
+
+Transform transform_from_mat4(const mat4 *m) {
+  Transform result = transform_default();
+  vec3 translation =
+      HMM_V3(m->Elements[3][0], m->Elements[3][1], m->Elements[3][2]);
+  mat3 i = {
+      .Elements = {{m->Elements[0][0], m->Elements[0][1], m->Elements[0][2]},
+                   {m->Elements[1][0], m->Elements[1][1], m->Elements[1][2]},
+                   {m->Elements[2][0], m->Elements[2][1], m->Elements[2][2]}}};
+
+  float sx = HMM_LenV3(i.Columns[0]);
+  float sy = HMM_LenV3(i.Columns[1]);
+  float sz = signum(HMM_DeterminantM3(i)) * HMM_LenV3(i.Columns[2]);
+  vec3 scale = HMM_V3(sx, sy, sz);
+  i.Columns[0] = HMM_MulV3F(i.Columns[0], 1.0 / sx);
+  i.Columns[1] = HMM_MulV3F(i.Columns[1], 1.0 / sy);
+  i.Columns[2] = HMM_MulV3F(i.Columns[2], 1.0 / sz);
+  quat r = mat3_to_quat(i);
+
+  result.position = translation;
+  result.scale = scale;
+  result.rotation = r;
+
+  return result;
+}
+#endif
+
+#if 1
+mat4 transform_to_mat4(Transform t) {
+  mat4 out;
+  out = HMM_Scale(t.scale);
+  // NOTE THIS IS FOR LEFT HANDED COORDINATE SYSTEM
+  out = HMM_MulM4(HMM_QToM4(t.rotation), out);
+  out = HMM_MulM4(HMM_Translate(t.position), out);
+  return out;
+}
+#else
+// original
 mat4 transform_to_mat4(Transform t) {
   // First, extract the rotation basis of the transform
   //   vec3 x = t.rotation * vec3(1, 0, 0);
@@ -263,6 +431,7 @@ mat4 transform_to_mat4(Transform t) {
                   p.X, p.Y, p.Z, 1  // Position
   );
 }
+#endif
 
 // Some important things to note. Each joint has a transform and a parent.
 //
@@ -356,7 +525,7 @@ Pose pose_load_rest_pose_from_cgltf(cgltf_data *data) {
   return out;
 }
 
-// glTF stores inverse bind pose matrix for each joint. We want bind pose. To
+// glTF stores inverse bind pose matrix for each joint. We want bind pose.To
 // do this we load the rest pose and invert each joint's matrix. Inverting an
 // inverse matrix returns the original matrix.
 //
@@ -463,11 +632,6 @@ void skeleton_update_inverse_bind_pose(Skeleton *sk);
 
 Skeleton skeleton_load(cgltf_data *data) {
   Pose rest_pose = pose_load_rest_pose_from_cgltf(data);
-  // printf("PARENTS: [\n");
-  // for (u32 i = 0; i < rest_pose.len; i++) {
-  //   printf("  %d: %d,\n", i, rest_pose.parents[i]);
-  // }
-  // printf("[\n");
   Skeleton sk = {.rest_pose = rest_pose,
                  .bind_pose = pose_load_bind_pose_from_cgltf(data, rest_pose),
                  .joint_names = cgltf_load_joint_names(data),
@@ -495,7 +659,7 @@ typedef struct {
   vec3 *norms;
   vec4 *weights;
   // ivec4 *influences;
-  shortvec4 *influences;
+  u8vec4 *influences;
   vec3 *skinned_positions;
   vec3 *skinned_normals;
   u32 vertices_len;
@@ -506,6 +670,16 @@ typedef struct {
 } BoneMesh;
 
 typedef array_type(BoneMesh) bonemesh_array_t;
+
+#define M4V4D(m, mRow, x, y, z, w)                                             \
+  x *m.Elements[0][mRow] + y *m.Elements[1][mRow] + z *m.Elements[2][mRow] +   \
+      w *m.Elements[3][mRow]
+
+vec3 test_this_way(mat4 m, vec3 v) {
+  return HMM_V3(M4V4D(m, 0, v.X, v.Y, v.Z, 1.0f),
+                M4V4D(m, 1, v.X, v.Y, v.Z, 1.0f),
+                M4V4D(m, 2, v.X, v.Y, v.Z, 1.0f));
+}
 
 void bonemesh_init(BoneMesh *mesh) {
   mesh->positions = NULL;
@@ -532,7 +706,7 @@ void bonemesh_cpu_skin(BoneMesh *mesh, const Skeleton *sk, const Pose *p) {
 
   for (u32 i = 0; i < num_verts; i++) {
     // ivec4 joint = mesh->influences[i];
-    shortvec4 joint = mesh->influences[i];
+    u8vec4 joint = mesh->influences[i];
     vec4 weight = mesh->weights[i];
 
     mat4 m0 = HMM_MulM4F(
@@ -549,10 +723,14 @@ void bonemesh_cpu_skin(BoneMesh *mesh, const Skeleton *sk, const Pose *p) {
         weight.W);
 
     mat4 skin = HMM_AddM4(HMM_AddM4(HMM_AddM4(m0, m1), m2), m3);
-    mesh->skinned_positions[i] = vec4_truncate(
-        HMM_MulM4V4(skin, vec3_to_vec4_point(mesh->positions[i])));
-    mesh->skinned_normals[i] =
-        vec4_truncate(HMM_MulM4V4(skin, vec3_to_vec4_vec(mesh->norms[i])));
+
+    // mesh->skinned_positions[i] = vec4_truncate(
+    //     HMM_MulM4V4(skin, vec3_to_vec4_point(mesh->positions[i])));
+    // mesh->skinned_normals[i] =
+    //     vec4_truncate(HMM_MulM4V4(skin, vec3_to_vec4_vec(mesh->norms[i])));
+
+    mesh->skinned_positions[i] = test_this_way(skin, mesh->positions[i]);
+    mesh->skinned_normals[i] = test_this_way(skin, mesh->norms[i]);
   }
 }
 
@@ -565,7 +743,7 @@ void bonemesh_cpu_skin1(BoneMesh *mesh, const Skeleton *sk, const Pose *p) {
 
   for (u32 i = 0; i < num_verts; i++) {
     // ivec4 *joint = &mesh->influences[i];
-    shortvec4 *joint = &mesh->influences[i];
+    u8vec4 *joint = &mesh->influences[i];
     vec4 weight = mesh->weights[i];
 
     Transform skin0 =
@@ -617,10 +795,19 @@ void bonemesh_init_attributes(BoneMesh *mesh, cgltf_attribute *attribute) {
   mesh->norms = malloc(sizeof(vec3) * len);
   mesh->weights = malloc(sizeof(vec4) * len);
   // mesh->influences = malloc(sizeof(ivec4) * len);
-  mesh->influences = malloc(sizeof(shortvec4) * len);
+  mesh->influences = malloc(sizeof(u8vec4) * len);
   mesh->skinned_positions = malloc(sizeof(vec3) * len);
   mesh->skinned_normals = malloc(sizeof(vec3) * len);
   mesh->vertices_len = len;
+}
+
+static inline vec3 convert(vec3 in) {
+#ifdef LEFT_HANDED
+  return HMM_V3(in.X, in.Z, -in.Y);
+// return HMM_V3(in.X, -in.Y, in.Z);
+#else
+  return in;
+#endif
 }
 
 void bonemesh_from_attribute(BoneMesh *out_mesh, cgltf_attribute *attribute,
@@ -647,12 +834,12 @@ void bonemesh_from_attribute(BoneMesh *out_mesh, cgltf_attribute *attribute,
     int index = i * component_count;
     switch (attrib_type) {
     case cgltf_attribute_type_position:
-      out_mesh->positions[i] = HMM_V3(values.ptr[index], values.ptr[index + 1],
-                                      values.ptr[index + 2]);
+      out_mesh->positions[i] = convert(HMM_V3(
+          values.ptr[index], values.ptr[index + 1], values.ptr[index + 2]));
       break;
     case cgltf_attribute_type_normal:
-      out_mesh->norms[i] = HMM_V3(values.ptr[index], values.ptr[index + 1],
-                                  values.ptr[index + 2]);
+      out_mesh->norms[i] = convert(HMM_V3(
+          values.ptr[index], values.ptr[index + 1], values.ptr[index + 2]));
       break;
     case cgltf_attribute_type_texcoord:
       out_mesh->texcoords[i] = HMM_V2(values.ptr[index], values.ptr[index + 1]);
@@ -670,10 +857,10 @@ void bonemesh_from_attribute(BoneMesh *out_mesh, cgltf_attribute *attribute,
       //                       (int)(values.ptr[index + 1] + 0.5f),
       //                       (int)(values.ptr[index + 2] + 0.5f),
       //                       (int)(values.ptr[index + 3] + 0.5f)}};
-      shortvec4 joints = {.v = {(int)(values.ptr[index + 0] + 0.5f),
-                                (int)(values.ptr[index + 1] + 0.5f),
-                                (int)(values.ptr[index + 2] + 0.5f),
-                                (int)(values.ptr[index + 3] + 0.5f)}};
+      u8vec4 joints = {.v = {(int)(values.ptr[index + 0] + 0.5f),
+                             (int)(values.ptr[index + 1] + 0.5f),
+                             (int)(values.ptr[index + 2] + 0.5f),
+                             (int)(values.ptr[index + 3] + 0.5f)}};
 
       // Now convert from being relative to joints array to being
       // relative to the skeleton hierarchy
@@ -741,7 +928,11 @@ Transform cgltf_get_local_transform(cgltf_node *n) {
   Transform result = transform_default();
 
   if (n->has_matrix) {
-    mat4 mat = (mat4){.Elements = *n->matrix};
+    mat4 mat =
+        mat4_new(n->matrix[0], n->matrix[1], n->matrix[2], n->matrix[3],
+                 n->matrix[4], n->matrix[5], n->matrix[6], n->matrix[7],
+                 n->matrix[8], n->matrix[9], n->matrix[10], n->matrix[11],
+                 n->matrix[12], n->matrix[13], n->matrix[14], n->matrix[15]);
     result = transform_from_mat4(&mat);
   }
   if (n->has_translation) {
@@ -810,52 +1001,6 @@ static struct {
   vs_params_t vs_params;
 } state;
 
-typedef struct ModelData {
-  const HMM_Vec3 *vertices;
-  u32 vertices_len;
-} ModelData;
-
-ModelData load_cgltf(cgltf_options *opts, cgltf_data *data) {
-  ModelData model_data = {};
-
-  if (cgltf_parse_file(opts, "./src/assets/Woman.gltf", &data) !=
-      cgltf_result_success) {
-    printf("Failed to parse scene\n");
-    exit(1);
-  }
-
-  if (cgltf_load_buffers(opts, data, "./src/assets/Woman.gltf") !=
-      cgltf_result_success) {
-    cgltf_free(data);
-    printf("Failed to load buffers\n");
-    exit(1);
-  }
-
-  if (cgltf_validate(data) != cgltf_result_success) {
-    cgltf_free(data);
-    printf("glTF data validation failed!\n");
-    exit(1);
-  }
-
-  const cgltf_mesh *mesh = &data->meshes[0];
-
-  for (usize i = 0; i < mesh->primitives_count; i++) {
-    const cgltf_primitive *prim = &mesh->primitives[i];
-    for (usize i = 0; i < prim->attributes_count; i++) {
-      const cgltf_attribute *attrib = &prim->attributes[i];
-      if (attrib->type == cgltf_attribute_type_position) {
-        const cgltf_accessor *accessor = &data->accessors[attrib->index];
-        const cgltf_buffer_view *buffer_view = accessor->buffer_view;
-        const u8 *buf = cgltf_buffer_view_data(buffer_view);
-        model_data.vertices = (const HMM_Vec3 *)buf;
-        model_data.vertices_len = accessor->count;
-      }
-    }
-  }
-
-  return model_data;
-}
-
 void set_vs_params() {
   vs_params_t vs_params;
   ZERO(vs_params);
@@ -867,17 +1012,16 @@ void set_vs_params() {
   // const float t = (float)(sapp_frame_duration());
   const float t = 1.0;
 
-  HMM_Mat4 proj = HMM_Perspective_LH_ZO(60.0f, w / h, 0.01f, 10.0f);
-  HMM_Mat4 view = HMM_LookAt_LH((HMM_Vec3){.X = 0.0f, .Y = 1.5f, .Z = 6.0f},
-                                (HMM_Vec3){.X = 0.0f, .Y = 0.0f, .Z = 0.0f},
-                                (HMM_Vec3){.X = 0.0f, .Y = 1.0f, .Z = 0.0f});
+  HMM_Mat4 proj = HMM_Perspective(60.0f, w / h, 0.01f, 10.0f);
+  HMM_Mat4 view = HMM_LookAt((HMM_Vec3){.X = 0.0f, .Y = 1.5f, .Z = 6.0f},
+                             (HMM_Vec3){.X = 0.0f, .Y = 0.0f, .Z = 0.0f},
+                             (HMM_Vec3){.X = 0.0f, .Y = 1.0f, .Z = 0.0f});
   state.rx += 1.0f * t;
   state.ry += 2.0f * t;
-  HMM_Mat4 rxm = HMM_Rotate_LH(state.rx, (HMM_Vec3){{1.0f, 0.0f, 0.0f}});
-  HMM_Mat4 rym = HMM_Rotate_LH(state.ry, (HMM_Vec3){{0.0f, 1.0f, 0.0f}});
-  HMM_Mat4 model = HMM_MulM4(
-      HMM_Translate(HMM_V3(-0.5, 0.0, -0.5)),
-      HMM_MulM4(HMM_MulM4(rxm, rym), HMM_Scale(HMM_V3(0.01, .01, .01))));
+  // HMM_Mat4 rxm = HMM_Rotate(state.rx, (HMM_Vec3){{1.0f, 0.0f, 0.0f}});
+  // HMM_Mat4 rym = HMM_Rotate(state.ry, (HMM_Vec3){{0.0f, 1.0f, 0.0f}});
+  HMM_Mat4 model = HMM_MulM4(HMM_Translate(HMM_V3(-0.5, 0.0, -0.5)),
+                             HMM_Scale(HMM_V3(0.01, .01, .01)));
   // HMM_MulM4(HMM_MulM4(rxm, rym), HMM_Scale(HMM_V3(1.01, 1.01, 1.01))));
 
   vs_params.model = model;
@@ -906,6 +1050,7 @@ void init(void) {
   cgltf_data *data = NULL;
   const char *path = "./src/assets/Woman.gltf";
   // const char *path = "./src/assets/scene.gltf";
+  // const char *path = "./src/assets/simple_skin.gltf";
   if (cgltf_parse_file(&opts, path, &data) != cgltf_result_success) {
     printf("Failed to parse scene\n");
     exit(1);
@@ -929,7 +1074,7 @@ void init(void) {
   bonemesh_array_t meshes = bonemesh_load_meshes(data);
   state.bm = meshes.ptr[0];
   state.sk = skeleton_load(data);
-  state.animated_pose = state.sk.rest_pose;
+  pose_cpy(&state.sk.rest_pose, &state.animated_pose);
   state.pose_palette = array_empty(mat4array_t);
   state.inv_bind_pose = (mat4array_t){
       .ptr = state.sk.inv_bind_pose,
@@ -941,7 +1086,7 @@ void init(void) {
   printf("INDICES LEN: %zu\n", state.bm.indices.len);
 
 #ifdef CPU_SKIN
-  bonemesh_cpu_skin1(&state.bm, &state.sk, &state.animated_pose);
+  bonemesh_cpu_skin(&state.bm, &state.sk, &state.animated_pose);
 #endif
 
 /* create shader */
@@ -985,7 +1130,7 @@ void init(void) {
       // .data = (sg_range){(vec4 *)state.bm.influences,
       //                    sizeof(ivec4) * state.bm.vertices_len},
       .data = (sg_range){state.bm.influences,
-                         sizeof(shortvec4) * state.bm.vertices_len},
+                         sizeof(u8vec4) * state.bm.vertices_len},
       .label = "model-influences"});
 
   sg_buffer ibuf = sg_make_buffer(
@@ -1012,13 +1157,15 @@ void init(void) {
               .attrs[3] = {.format = SG_VERTEXFORMAT_FLOAT4, .buffer_index = 3},
               // influences
               // .buffers[4].stride = sizeof(ivec4),
-              .buffers[4].stride = sizeof(shortvec4),
-              .attrs[4] = {.format = SG_VERTEXFORMAT_SHORT4, .buffer_index = 4},
+              .buffers[4].stride = sizeof(u8vec4),
+              .attrs[4] = {.format = SG_VERTEXFORMAT_UBYTE4, .buffer_index = 4},
           },
       .shader = shd,
       .index_type = SG_INDEXTYPE_UINT32,
-      .face_winding = SG_FACEWINDING_CCW,
+      // .face_winding = SG_FACEWINDING_CCW,
       .cull_mode = SG_CULLMODE_BACK,
+      .face_winding = SG_FACEWINDING_CCW,
+      // .cull_mode = SG_CULLMODE_FRONT,
       // .face_winding = SG_FACEWINDING_CW,
       // .cull_mode = SG_CULLMODE_FRONT,
       .depth =
@@ -1067,15 +1214,21 @@ void frame(void) {
   //   const float t = (float)(sapp_frame_duration() * 60.0);
   const float t = (float)(sapp_frame_duration());
 
-  HMM_Mat4 proj = HMM_Perspective_LH_ZO(60.0f, w / h, 0.01f, 10.0f);
-  HMM_Mat4 view = HMM_LookAt_LH((HMM_Vec3){.X = 0.0f, .Y = 1.5f, .Z = 6.0f},
-                                (HMM_Vec3){.X = 0.0f, .Y = 0.0f, .Z = 0.0f},
-                                (HMM_Vec3){.X = 0.0f, .Y = 1.0f, .Z = 0.0f});
+  HMM_Mat4 proj = HMM_Perspective(60.0f, w / h, 0.01f, 1000.0f);
+  HMM_Mat4 view = HMM_LookAt((HMM_Vec3){.X = 0.0f, .Y = 5.0f, .Z = 7.0f},
+                             (HMM_Vec3){.X = 0.0f, .Y = 3.0f, .Z = 0.0f},
+                             (HMM_Vec3){.X = 0.0f, .Y = 1.0f, .Z = 0.0f});
   state.ry += 1.0f * t;
-  HMM_Mat4 rym = HMM_Rotate_LH(state.ry, (HMM_Vec3){{0.0f, 1.0f, 0.0f}});
+  HMM_Mat4 rym = HMM_Rotate(state.ry, (HMM_Vec3){{0.0f, 1.0f, 0.0f}});
   HMM_Mat4 model =
-      HMM_MulM4(HMM_Translate(HMM_V3(-0.0, 0.0, 10.5)),
-                HMM_MulM4(rym, HMM_Scale(HMM_V3(1.01, 1.01, 1.01))));
+      HMM_MulM4(HMM_Translate(HMM_V3(-0.0, 0.0, -5.5)),
+                HMM_MulM4(rym, HMM_Scale(HMM_V3(0.01, 0.01, 0.01))));
+
+  // HMM_Mat4 model = HMM_MulM4(HMM_Translate(HMM_V3(-0.0, 0.0, -10.5)),
+  //                            HMM_Scale(HMM_V3(.1, .1, .1)));
+
+  // HMM_Mat4 model = HMM_MulM4(HMM_Translate(HMM_V3(-2.0, 0.0, 5.0)),
+  //                            HMM_Scale(HMM_V3(0.5, 0.5, 0.5)));
   // HMM_MulM4(HMM_MulM4(rxm, rym), HMM_Scale(HMM_V3(1.01, 1.01, 1.01))));
 
   state.vs_params.model = model;
@@ -1102,16 +1255,6 @@ void frame(void) {
 }
 
 void cleanup(void) { sg_shutdown(); }
-
-#define M4V4D(m, mRow, x, y, z, w)                                             \
-  x *m.Elements[0][mRow] + y *m.Elements[1][mRow] + z *m.Elements[2][mRow] +   \
-      w *m.Elements[3][mRow]
-
-vec3 test_this_way(mat4 m, vec4 v) {
-  return HMM_V3(M4V4D(m, 0, v.X, v.Y, v.Z, 1.0f),
-                M4V4D(m, 1, v.X, v.Y, v.Z, 1.0f),
-                M4V4D(m, 2, v.X, v.Y, v.Z, 1.0f));
-}
 
 sapp_desc sokol_main(int argc, char *argv[]) {
   (void)argc;

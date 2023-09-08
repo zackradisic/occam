@@ -13,23 +13,20 @@ layout(location = 0) in vec3 position;
 layout(location = 1) in vec3 normal;
 layout(location = 2) in vec2 texCoord;
 layout(location = 3) in vec4 weights;
-layout(location = 4) in ivec4 joints;
+layout(location = 4) in uvec4 joints;
 
 out vec3 norm;
 out vec3 fragPos;
 out vec2 uv;
 
 void main() {
-    // mat4 skin = (pose[floatBitsToInt(joints.x)] *  invBindPose[floatBitsToInt(joints.x)]) * weights.x;
-    // skin += (pose[floatBitsToInt(joints.y)] *  invBindPose[floatBitsToInt(joints.y)]) * weights.y;
-    // skin += (pose[floatBitsToInt(joints.z)] * invBindPose[floatBitsToInt(joints.z)]) * weights.z;
-    // skin += (pose[floatBitsToInt(joints.w)] * invBindPose[floatBitsToInt(joints.w)]) * weights.w;
-    mat4 skin = (pose[joints.x] *  invBindPose[joints.x]) * weights.x;
-    skin += (pose[joints.y] *  invBindPose[joints.y]) * weights.y;
-    skin += (pose[joints.z] * invBindPose[joints.z]) * weights.z;
-    skin += (pose[joints.w] * invBindPose[joints.w]) * weights.w;
+    mat4 skin = (pose[int(joints.x)] *  invBindPose[int(joints.x)]) * weights.x;
+    skin += (pose[int(joints.y)] *  invBindPose[int(joints.y)]) * weights.y;
+    skin += (pose[int(joints.z)] * invBindPose[int(joints.z)]) * weights.z;
+    skin += (pose[int(joints.w)] * invBindPose[int(joints.w)]) * weights.w;
 
     gl_Position = projection * view * model * skin * vec4(position, 1.0);
+    // gl_Position = projection * view * model * vec4(position, 1.0);
     
     fragPos = vec3(model * skin * vec4(position, 1.0));
     norm = vec3(model * skin * vec4(normal, 0.0f));

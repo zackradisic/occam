@@ -1,13 +1,15 @@
 #define SOKOL_IMPL
 // #define SOKOL_NO_ENTRY
 
-#if defined(_WIN32)
-#define SOKOL_D3D11 // or SOKOL_GLCORE33, etc. based on your needs
-#elif defined(__APPLE__)
+// #if defined(_WIN32)
+// #define SOKOL_D3D11 // or SOKOL_GLCORE33, etc. based on your needs
+// #elif defined(__APPLE__)
+// #define SOKOL_METAL
+// #elif defined(__linux__)
+// #define SOKOL_GLCORE33
+// #endif
+// #define SOKOL_GLCORE33
 #define SOKOL_METAL
-#elif defined(__linux__)
-#define SOKOL_GLCORE33
-#endif
 
 // #include "../lib/sokol/sokol_app.h"
 // #include "../lib/sokol/sokol_gfx.h"

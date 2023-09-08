@@ -1,0 +1,7 @@
+#+title: Todo
+
+* TODO [0/2]
+** TODO cross platform
+*** TODO handedness + z coordinate
+change _LH handmade math functions
+
