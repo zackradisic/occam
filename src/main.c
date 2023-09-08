@@ -1,7 +1,7 @@
 // For wasm i think turn off?
 #define HANDMADE_MATH_NO_SSE
 
-// #define CPU_SKIN
+#define CPU_SKIN
 
 #define SOKOL_IMPL
 #include <HandmadeMath.h>
@@ -128,6 +128,16 @@ typedef union {
   u8 v[4];
 
 } u8vec4;
+
+static inline vec3 vec3_convert_handedness(vec3 in) {
+#ifdef LEFT_HANDED
+  return HMM_V3(in.X, in.Z, -in.Y);
+  // return HMM_V3(in.X, in.Y, in.Z);
+  // return HMM_V3(in.X, -in.Y, in.Z);
+#else
+  return in;
+#endif
+}
 
 static inline vec3 vec3_default() { return (vec3){0, 0, 0}; }
 static inline vec4 vec4_default() { return (vec4){0, 0, 0, 0}; }
@@ -266,6 +276,27 @@ typedef struct {
 } Transform;
 
 Transform cgltf_get_local_transform(cgltf_node *n);
+void transform_convert_handedness(Transform *t);
+
+// This function should be called whenever we create a transform from glTF
+// values, this is because glTF uses a right handed coordinate system.
+void transform_convert_handedness(Transform *t) {
+#ifdef LEFT_HANDED
+  // Converting from right-handed to left-handed coordinate system
+  t->position = vec3_convert_handedness(t->position);
+  t->scale = vec3_convert_handedness(t->scale);
+  // t->rotation = (quat){.W = t->rotation.W,
+  //                      .X = -t->rotation.X,
+  //                      .Y = -t->rotation.Y,
+  //                      .Z = t->rotation.Z};
+  t->rotation = (quat){.W = t->rotation.W,
+                       .X = -t->rotation.X,
+                       .Y = -t->rotation.Y,
+                       .Z = t->rotation.Z};
+#else
+  // Assuming it's already in a right-handed coordinate system, so do nothing.
+#endif
+}
 
 Transform transform_default() {
   Transform out;
@@ -319,12 +350,12 @@ vec3 transform_vector(const Transform *t, vec3 v) {
   return out;
 }
 
-#if 0
-Transform transform_from_mat4(const mat4 *m) {
+#if 1
+Transform transform_from_mat4_rh(const mat4 *m) {
   Transform out = transform_default();
 
   out.position = HMM_V3(m->Columns[3].X, m->Columns[3].Y, m->Columns[3].Z);
-  out.rotation = HMM_M4ToQ(*m);
+  out.rotation = HMM_M4ToQ_RH(*m);
 
   mat4 rot_scale_mat =
       mat4_new(m->Columns[0].X, m->Columns[0].Y, m->Columns[0].Z, 0, // col 1
@@ -408,8 +439,7 @@ quat mat3_to_quat(mat3 m) {
   }
 }
 
-Transform transform_from_mat4(mat4 *m) {
-  convertm4(m);
+Transform transform_from_mat4(const mat4 *m) {
   Transform result = transform_default();
   vec3 translation =
       HMM_V3(m->Elements[3][0], m->Elements[3][1], m->Elements[3][2]);
@@ -560,6 +590,7 @@ Pose pose_load_rest_pose_from_cgltf(cgltf_data *data) {
   for (usize i = 0; i < bone_count; i++) {
     cgltf_node *node = &data->nodes[i];
     Transform transform = cgltf_get_local_transform(node);
+    transform_convert_handedness(&transform);
     out.joints[i] = transform;
     int parent = cgltf_get_node_index(node->parent, data->nodes, bone_count);
     out.parents[i] = parent;
@@ -603,7 +634,8 @@ Pose pose_load_bind_pose_from_cgltf(cgltf_data *data, Pose rest_pose) {
       // Re-invert to: Space(bone) -> Space(model/world)
       mat4 inv_bind_matrix = mat4_new_from_arr(matrix);
       mat4 bind_matrix = HMM_InvGeneralM4(inv_bind_matrix);
-      Transform bind_transform = transform_from_mat4(&bind_matrix);
+      Transform bind_transform = transform_from_mat4_rh(&bind_matrix);
+      transform_convert_handedness(&bind_transform);
       cgltf_node *joint_node = skin->joints[j];
       int joint_index =
           cgltf_get_node_index(joint_node, data->nodes, data->nodes_count);
@@ -844,15 +876,6 @@ void bonemesh_init_attributes(BoneMesh *mesh, cgltf_attribute *attribute) {
   mesh->vertices_len = len;
 }
 
-static inline vec3 convert(vec3 in) {
-#ifdef LEFT_HANDED
-  return HMM_V3(in.X, in.Z, -in.Y);
-  // return HMM_V3(in.X, -in.Y, in.Z);
-#else
-  return in;
-#endif
-}
-
 void bonemesh_from_attribute(BoneMesh *out_mesh, cgltf_attribute *attribute,
                              cgltf_skin *skin, cgltf_node *nodes,
                              u32 node_count) {
@@ -877,11 +900,11 @@ void bonemesh_from_attribute(BoneMesh *out_mesh, cgltf_attribute *attribute,
     int index = i * component_count;
     switch (attrib_type) {
     case cgltf_attribute_type_position:
-      out_mesh->positions[i] = convert(HMM_V3(
+      out_mesh->positions[i] = vec3_convert_handedness(HMM_V3(
           values.ptr[index], values.ptr[index + 1], values.ptr[index + 2]));
       break;
     case cgltf_attribute_type_normal:
-      out_mesh->norms[i] = convert(HMM_V3(
+      out_mesh->norms[i] = vec3_convert_handedness(HMM_V3(
           values.ptr[index], values.ptr[index + 1], values.ptr[index + 2]));
       break;
     case cgltf_attribute_type_texcoord:
@@ -900,10 +923,16 @@ void bonemesh_from_attribute(BoneMesh *out_mesh, cgltf_attribute *attribute,
       //                       (int)(values.ptr[index + 1] + 0.5f),
       //                       (int)(values.ptr[index + 2] + 0.5f),
       //                       (int)(values.ptr[index + 3] + 0.5f)}};
-      u8vec4 joints = {.v = {(int)(values.ptr[index + 0] + 0.5f),
-                             (int)(values.ptr[index + 1] + 0.5f),
-                             (int)(values.ptr[index + 2] + 0.5f),
-                             (int)(values.ptr[index + 3] + 0.5f)}};
+      // u8vec4 joints = {.v = {(int)(values.ptr[index + 0] + 0.5f),
+      //                        (int)(values.ptr[index + 1] + 0.5f),
+      //                        (int)(values.ptr[index + 2] + 0.5f),
+      //                        (int)(values.ptr[index + 3] + 0.5f)}};
+      // printf("VALUE: %f %f %f %f\n", values.ptr[index + 0],
+      //        values.ptr[index + 1], values.ptr[index + 2],
+      //        values.ptr[index + 3]);
+      u8vec4 joints = {
+          .v = {(int)(values.ptr[index + 0]), (int)(values.ptr[index + 1]),
+                (int)(values.ptr[index + 2]), (int)(values.ptr[index + 3])}};
 
       // Now convert from being relative to joints array to being
       // relative to the skeleton hierarchy
@@ -915,6 +944,7 @@ void bonemesh_from_attribute(BoneMesh *out_mesh, cgltf_attribute *attribute,
           0, cgltf_get_node_index(skin->joints[joints.z], nodes, node_count));
       joints.w = MAX(
           0, cgltf_get_node_index(skin->joints[joints.w], nodes, node_count));
+
       out_mesh->influences[i] = joints;
       break;
     }
@@ -967,6 +997,7 @@ bonemesh_array_t bonemesh_load_meshes(cgltf_data *data) {
   return result;
 }
 
+// Make sure to call `transform_convert_handedness()` if you want to use this
 Transform cgltf_get_local_transform(cgltf_node *n) {
   Transform result = transform_default();
 
@@ -976,11 +1007,11 @@ Transform cgltf_get_local_transform(cgltf_node *n) {
                  n->matrix[4], n->matrix[5], n->matrix[6], n->matrix[7],
                  n->matrix[8], n->matrix[9], n->matrix[10], n->matrix[11],
                  n->matrix[12], n->matrix[13], n->matrix[14], n->matrix[15]);
-    result = transform_from_mat4(&mat);
+    result = transform_from_mat4_rh(&mat);
   }
   if (n->has_translation) {
-    result.position = convert(
-        HMM_V3(n->translation[0], n->translation[1], n->translation[2]));
+    result.position =
+        HMM_V3(n->translation[0], n->translation[1], n->translation[2]);
   }
   if (n->has_rotation) {
     result.rotation =
@@ -988,7 +1019,7 @@ Transform cgltf_get_local_transform(cgltf_node *n) {
   }
 
   if (n->has_scale) {
-    result.scale = convert(HMM_V3(n->scale[0], n->scale[1], n->scale[2]));
+    result.scale = HMM_V3(n->scale[0], n->scale[1], n->scale[2]);
   }
 
   return result;
@@ -1064,8 +1095,11 @@ void set_vs_params() {
   // HMM_Mat4 rxm = HMM_Rotate(state.rx, (HMM_Vec3){{1.0f, 0.0f, 0.0f}});
   // HMM_Mat4 rym = HMM_Rotate(state.ry, (HMM_Vec3){{0.0f, 1.0f, 0.0f}});
 
-  HMM_Mat4 model = HMM_MulM4(HMM_Translate(HMM_V3(-0.5, 0.0, -0.5)),
-                             HMM_Scale(HMM_V3(0.01, .01, .01)));
+  // HMM_Mat4 model = HMM_MulM4(HMM_Translate(HMM_V3(-0.5, 0.0, -0.5)),
+  //                            HMM_Scale(HMM_V3(1.0, 1.0, 1.0)));
+  // HMM_Mat4 model = HMM_Scale(HMM_V3(1.0, 1.0, 1.0));
+
+  HMM_Mat4 model = HMM_M4D(1.0);
 
   // HMM_MulM4(HMM_MulM4(rxm, rym), HMM_Scale(HMM_V3(1.01, 1.01, 1.01))));
   // HMM_Mat4 model = HMM_M4D(1.0);
@@ -1094,8 +1128,8 @@ void init(void) {
   cgltf_options opts = {};
   ZERO(opts);
   cgltf_data *data = NULL;
-  // const char *path = "./src/assets/Woman.gltf";
-  const char *path = "./src/assets/scene.gltf";
+  const char *path = "./src/assets/Woman.gltf";
+  // const char *path = "./src/assets/scene.gltf";
   // const char *path = "./src/assets/simple_skin.gltf";
   if (cgltf_parse_file(&opts, path, &data) != cgltf_result_success) {
     printf("Failed to parse scene\n");
@@ -1127,6 +1161,12 @@ void init(void) {
       .len = state.sk.joints_len,
       .cap = state.sk.joints_len,
   };
+
+  for (u32 i = 0; i < state.bm.vertices_len; i++) {
+    vec4 weights = state.bm.weights[i];
+    float result = weights.X + weights.Y + weights.Z + weights.W;
+    safecheckf(float_eq(result, 1.0), "got: %f\n", result);
+  }
 
   printf("VERTICES LEN: %d\n", state.bm.vertices_len);
   printf("INDICES LEN: %zu\n", state.bm.indices.len);
@@ -1208,9 +1248,13 @@ void init(void) {
           },
       .shader = shd,
       .index_type = SG_INDEXTYPE_UINT32,
-      // .face_winding = SG_FACEWINDING_CCW,
-      .cull_mode = SG_CULLMODE_FRONT,
+#ifdef SOKOL_METAL
       .face_winding = SG_FACEWINDING_CCW,
+      .cull_mode = SG_CULLMODE_BACK,
+#endif
+      // .face_winding = SG_FACEWINDING_CCW,
+      // .cull_mode = SG_CULLMODE_FRONT,
+      // .face_winding = SG_FACEWINDING_CCW,
       // .cull_mode = SG_CULLMODE_FRONT,
       // .face_winding = SG_FACEWINDING_CW,
       // .cull_mode = SG_CULLMODE_FRONT,
@@ -1260,19 +1304,32 @@ void frame(void) {
   //   const float t = (float)(sapp_frame_duration() * 60.0);
   const float t = (float)(sapp_frame_duration());
 
-  HMM_Mat4 proj = HMM_Perspective(60.0f, w / h, 0.01f, 1000.0f);
-  // const float aspect_ratio = w / h;
-  // HMM_Mat4 proj = HMM_Orthographic(-aspect_ratio, aspect_ratio, -1, 1, -1,
-  // 10);
-  HMM_Mat4 view = HMM_LookAt((HMM_Vec3){.X = 0.0f, .Y = 5.0f, .Z = 7.0f},
-                             (HMM_Vec3){.X = 0.0f, .Y = 3.0f, .Z = 0.0f},
-                             (HMM_Vec3){.X = 0.0f, .Y = 1.0f, .Z = 0.0f});
+  // HMM_Mat4 proj = HMM_Perspective(50.0, w / h, 0.01f, 1000.0f);
+  // HMM_Mat4 view = HMM_LookAt((HMM_Vec3){.X = 0.0f, .Y = 5.0f, .Z = 7.0f},
+  //                            (HMM_Vec3){.X = 0.0f, .Y = 3.0f, .Z = 0.0f},
+  //                            (HMM_Vec3){.X = 0.0f, .Y = 1.0f, .Z = 0.0f});
+
+  const float aspect_ratio = w / h;
+  HMM_Mat4 proj =
+      HMM_Orthographic(-aspect_ratio, aspect_ratio, -1, 1, 0.001, 1000);
+  HMM_Mat4 view = HMM_M4D(1.0);
+
+#ifdef LEFT_HANDED
+#define ZPOS 5.0
+#else
+#define ZPOS -5.0
+#endif
+
   state.ry += 1.0f * t;
   state.rx += 1.0f * t;
   HMM_Mat4 rym = HMM_Rotate(state.ry, (HMM_Vec3){{0.0f, 1.0f, 0.0f}});
   HMM_Mat4 rxm = HMM_Rotate(state.rx, (HMM_Vec3){{1.0f, 0.0f, 0.0f}});
-  HMM_Mat4 model = HMM_MulM4(HMM_Translate(HMM_V3(-0.0, 0.0, -10.5)),
-                             HMM_MulM4(rym, HMM_Scale(HMM_V3(0.1, 0.1, 0.1))));
+  HMM_Mat4 model =
+      HMM_MulM4(HMM_Translate(HMM_V3(0.0, -0.5, ZPOS)),
+                HMM_MulM4(rym, HMM_Scale(HMM_V3(0.25, 0.25, 0.25))));
+
+  // HMM_Mat4 model = HMM_Translate(HMM_MulM4(rym, HMM_Scale(HMM_V3(0.25, 0.25,
+  // 0.25)));
 
   // model = HMM_M4D(1.0);
 

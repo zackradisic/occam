@@ -26,8 +26,12 @@ void main() {
     skin += (pose[int(joints.w)] * invBindPose[int(joints.w)]) * weights.w;
 
     // gl_Position = projection * view * model * skin * vec4(position, 1.0);
+    // gl_Position = projection * view * model * skin * vec4(position, 1.0);
+    // gl_Position = projection * view * skin * vec4(position, 1.0);
+
     gl_Position = projection * view * model * skin * vec4(position, 1.0);
     // gl_Position = projection * view * model * vec4(position, 1.0);
+    
     
     fragPos = vec3(model * skin * vec4(position, 1.0));
     norm = vec3(model * skin * vec4(normal, 0.0f));
@@ -60,6 +64,7 @@ void main() {
 	FragColor = diffuseColor * diffuseIntensity;
 
 	FragColor = vec4(1.0, 0.0, 0.0, 1.0) * diffuseIntensity;
+	// FragColor = vec4(1.0, 0.0, 0.0, 1.0) ;
 }
 @end
 
