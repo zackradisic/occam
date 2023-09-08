@@ -41,6 +41,15 @@ static inline HMM_Quat HMM_M4ToQ(HMM_Mat4 M) {
 #endif
 }
 
+static inline HMM_Mat4 HMM_Orthographic(float Left, float Right, float Bottom,
+                                        float Top, float Near, float Far) {
+#ifdef LEFT_HANDED
+  return HMM_Orthographic_LH_ZO(Left, Right, Bottom, Top, Near, Far);
+#else
+  return HMM_Orthographic_RH_NO(Left, Right, Bottom, Top, Near, Far);
+#endif
+}
+
 static inline HMM_Mat4 HMM_Perspective(float FOV, float AspectRatio, float Near,
                                        float Far) {
 #ifdef LEFT_HANDED
@@ -142,6 +151,39 @@ mat4 mat4_new_from_arr(float *arr) {
   return mat4_new(arr[0], arr[1], arr[2], arr[3], arr[4], arr[5], arr[6],
                   arr[7], arr[8], arr[9], arr[10], arr[11], arr[12], arr[13],
                   arr[14], arr[15]);
+}
+
+void convertRHtoLH(float mat[4][4]) {
+  // Swap rows 2 and 3
+  for (int i = 0; i < 4; ++i) {
+    float temp = mat[1][i];
+    mat[1][i] = mat[2][i];
+    mat[2][i] = temp;
+  }
+
+  // Swap columns 2 and 3
+  for (int i = 0; i < 4; ++i) {
+    float temp = mat[i][1];
+    mat[i][1] = mat[i][2];
+    mat[i][2] = temp;
+  }
+
+  // Negate all values in row 3
+  for (int i = 0; i < 4; ++i) {
+    mat[2][i] = -mat[2][i];
+  }
+
+  // Negate all values in column 3
+  for (int i = 0; i < 4; ++i) {
+    mat[i][2] = -mat[i][2];
+  }
+}
+
+void convertm4(mat4 *m) {
+#ifdef LEFT_HANDED
+  convertRHtoLH(m->Elements);
+#else
+#endif
 }
 
 #if 0
@@ -366,7 +408,8 @@ quat mat3_to_quat(mat3 m) {
   }
 }
 
-Transform transform_from_mat4(const mat4 *m) {
+Transform transform_from_mat4(mat4 *m) {
+  convertm4(m);
   Transform result = transform_default();
   vec3 translation =
       HMM_V3(m->Elements[3][0], m->Elements[3][1], m->Elements[3][2]);
@@ -804,7 +847,7 @@ void bonemesh_init_attributes(BoneMesh *mesh, cgltf_attribute *attribute) {
 static inline vec3 convert(vec3 in) {
 #ifdef LEFT_HANDED
   return HMM_V3(in.X, in.Z, -in.Y);
-// return HMM_V3(in.X, -in.Y, in.Z);
+  // return HMM_V3(in.X, -in.Y, in.Z);
 #else
   return in;
 #endif
@@ -936,8 +979,8 @@ Transform cgltf_get_local_transform(cgltf_node *n) {
     result = transform_from_mat4(&mat);
   }
   if (n->has_translation) {
-    result.position =
-        HMM_V3(n->translation[0], n->translation[1], n->translation[2]);
+    result.position = convert(
+        HMM_V3(n->translation[0], n->translation[1], n->translation[2]));
   }
   if (n->has_rotation) {
     result.rotation =
@@ -945,7 +988,7 @@ Transform cgltf_get_local_transform(cgltf_node *n) {
   }
 
   if (n->has_scale) {
-    result.scale = HMM_V3(n->scale[0], n->scale[1], n->scale[2]);
+    result.scale = convert(HMM_V3(n->scale[0], n->scale[1], n->scale[2]));
   }
 
   return result;
@@ -1020,9 +1063,12 @@ void set_vs_params() {
   state.ry += 2.0f * t;
   // HMM_Mat4 rxm = HMM_Rotate(state.rx, (HMM_Vec3){{1.0f, 0.0f, 0.0f}});
   // HMM_Mat4 rym = HMM_Rotate(state.ry, (HMM_Vec3){{0.0f, 1.0f, 0.0f}});
+
   HMM_Mat4 model = HMM_MulM4(HMM_Translate(HMM_V3(-0.5, 0.0, -0.5)),
                              HMM_Scale(HMM_V3(0.01, .01, .01)));
+
   // HMM_MulM4(HMM_MulM4(rxm, rym), HMM_Scale(HMM_V3(1.01, 1.01, 1.01))));
+  // HMM_Mat4 model = HMM_M4D(1.0);
 
   vs_params.model = model;
   vs_params.view = view;
@@ -1048,8 +1094,8 @@ void init(void) {
   cgltf_options opts = {};
   ZERO(opts);
   cgltf_data *data = NULL;
-  const char *path = "./src/assets/Woman.gltf";
-  // const char *path = "./src/assets/scene.gltf";
+  // const char *path = "./src/assets/Woman.gltf";
+  const char *path = "./src/assets/scene.gltf";
   // const char *path = "./src/assets/simple_skin.gltf";
   if (cgltf_parse_file(&opts, path, &data) != cgltf_result_success) {
     printf("Failed to parse scene\n");
@@ -1163,7 +1209,7 @@ void init(void) {
       .shader = shd,
       .index_type = SG_INDEXTYPE_UINT32,
       // .face_winding = SG_FACEWINDING_CCW,
-      .cull_mode = SG_CULLMODE_BACK,
+      .cull_mode = SG_CULLMODE_FRONT,
       .face_winding = SG_FACEWINDING_CCW,
       // .cull_mode = SG_CULLMODE_FRONT,
       // .face_winding = SG_FACEWINDING_CW,
@@ -1215,21 +1261,28 @@ void frame(void) {
   const float t = (float)(sapp_frame_duration());
 
   HMM_Mat4 proj = HMM_Perspective(60.0f, w / h, 0.01f, 1000.0f);
+  // const float aspect_ratio = w / h;
+  // HMM_Mat4 proj = HMM_Orthographic(-aspect_ratio, aspect_ratio, -1, 1, -1,
+  // 10);
   HMM_Mat4 view = HMM_LookAt((HMM_Vec3){.X = 0.0f, .Y = 5.0f, .Z = 7.0f},
                              (HMM_Vec3){.X = 0.0f, .Y = 3.0f, .Z = 0.0f},
                              (HMM_Vec3){.X = 0.0f, .Y = 1.0f, .Z = 0.0f});
   state.ry += 1.0f * t;
+  state.rx += 1.0f * t;
   HMM_Mat4 rym = HMM_Rotate(state.ry, (HMM_Vec3){{0.0f, 1.0f, 0.0f}});
-  HMM_Mat4 model =
-      HMM_MulM4(HMM_Translate(HMM_V3(-0.0, 0.0, -5.5)),
-                HMM_MulM4(rym, HMM_Scale(HMM_V3(0.01, 0.01, 0.01))));
+  HMM_Mat4 rxm = HMM_Rotate(state.rx, (HMM_Vec3){{1.0f, 0.0f, 0.0f}});
+  HMM_Mat4 model = HMM_MulM4(HMM_Translate(HMM_V3(-0.0, 0.0, -10.5)),
+                             HMM_MulM4(rym, HMM_Scale(HMM_V3(0.1, 0.1, 0.1))));
+
+  // model = HMM_M4D(1.0);
 
   // HMM_Mat4 model = HMM_MulM4(HMM_Translate(HMM_V3(-0.0, 0.0, -10.5)),
   //                            HMM_Scale(HMM_V3(.1, .1, .1)));
 
-  // HMM_Mat4 model = HMM_MulM4(HMM_Translate(HMM_V3(-2.0, 0.0, 5.0)),
-  //                            HMM_Scale(HMM_V3(0.5, 0.5, 0.5)));
-  // HMM_MulM4(HMM_MulM4(rxm, rym), HMM_Scale(HMM_V3(1.01, 1.01, 1.01))));
+  // HMM_Mat4 model = HMM_MulM4(
+  //     HMM_Translate(HMM_V3(-0.0, 0.0, -5.5)),
+  //     //  HMM_Scale(HMM_V3(0.5, 0.5, 0.5)));
+  //     HMM_MulM4(HMM_MulM4(rxm, rym), HMM_Scale(HMM_V3(0.1, 0.1, 0.1))));
 
   state.vs_params.model = model;
   state.vs_params.view = view;
