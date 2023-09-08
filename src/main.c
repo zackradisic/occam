@@ -1,7 +1,7 @@
 // For wasm i think turn off?
 #define HANDMADE_MATH_NO_SSE
 
-#define CPU_SKIN
+// #define CPU_SKIN
 
 #define SOKOL_IMPL
 #include <HandmadeMath.h>
@@ -129,11 +129,28 @@ typedef union {
 
 } u8vec4;
 
+#define M4V4D(m, mRow, x, y, z, w)                                             \
+  x *m.Elements[0][mRow] + y *m.Elements[1][mRow] + z *m.Elements[2][mRow] +   \
+      w *m.Elements[3][mRow]
+
+vec3 mat4_mul_v3(mat4 m, vec3 v) {
+  return HMM_V3(M4V4D(m, 0, v.X, v.Y, v.Z, 0.0f),
+                M4V4D(m, 1, v.X, v.Y, v.Z, 0.0f),
+                M4V4D(m, 2, v.X, v.Y, v.Z, 0.0f));
+}
+vec3 mat4_mul_p(mat4 m, vec3 v) {
+  return HMM_V3(M4V4D(m, 0, v.X, v.Y, v.Z, 1.0f),
+                M4V4D(m, 1, v.X, v.Y, v.Z, 1.0f),
+                M4V4D(m, 2, v.X, v.Y, v.Z, 1.0f));
+}
+
 static inline vec3 vec3_convert_handedness(vec3 in) {
 #ifdef LEFT_HANDED
-  return HMM_V3(in.X, in.Z, -in.Y);
+  // return HMM_V3(in.X, in.Z, -in.Y);
   // return HMM_V3(in.X, in.Y, in.Z);
+  return HMM_V3(in.X, in.Y, -in.Z);
   // return HMM_V3(in.X, -in.Y, in.Z);
+  // return in;
 #else
   return in;
 #endif
@@ -269,10 +286,15 @@ vec3 vec4_truncate(vec4 p) {
   };
 }
 
+#define TRANSFORM_USE_MATRICES
 typedef struct {
+#ifdef TRANSFORM_USE_MATRICES
+  mat4 m;
+#else
   vec3 position;
   quat rotation;
   vec3 scale;
+#endif
 } Transform;
 
 Transform cgltf_get_local_transform(cgltf_node *n);
@@ -282,6 +304,20 @@ void transform_convert_handedness(Transform *t);
 // values, this is because glTF uses a right handed coordinate system.
 void transform_convert_handedness(Transform *t) {
 #ifdef LEFT_HANDED
+#ifdef TRANSFORM_USE_MATRICES
+  // Negate the third row
+  // t->m.Elements[2][0] = -t->m.Elements[2][0];
+  // t->m.Elements[2][1] = -t->m.Elements[2][1];
+  // t->m.Elements[2][2] = -t->m.Elements[2][2];
+  // t->m.Elements[2][3] = -t->m.Elements[2][3];
+
+  // // Negate the third column
+  // t->m.Elements[0][2] = -t->m.Elements[0][2];
+  // t->m.Elements[1][2] = -t->m.Elements[1][2];
+  // t->m.Elements[2][2] = -t->m.Elements[2][2];
+  // t->m.Elements[3][2] = -t->m.Elements[3][2];
+  return;
+#else
   // Converting from right-handed to left-handed coordinate system
   t->position = vec3_convert_handedness(t->position);
   t->scale = vec3_convert_handedness(t->scale);
@@ -293,6 +329,7 @@ void transform_convert_handedness(Transform *t) {
                        .X = -t->rotation.X,
                        .Y = -t->rotation.Y,
                        .Z = t->rotation.Z};
+#endif
 #else
   // Assuming it's already in a right-handed coordinate system, so do nothing.
 #endif
@@ -300,23 +337,34 @@ void transform_convert_handedness(Transform *t) {
 
 Transform transform_default() {
   Transform out;
+#ifdef TRANSFORM_USE_MATRICES
+  out.m = HMM_M4D(1.0);
+#else
   out.position = HMM_V3(0, 0, 0);
   out.rotation = HMM_Q(0, 0, 0, 1);
   out.scale = HMM_V3(1, 1, 1);
+#endif
   return out;
 }
 
 // Order is right -> left
 Transform transform_combine(Transform a, Transform b) {
+#ifdef TRANSFORM_USE_MATRICES
+  return (Transform){.m = HMM_MulM4(a.m, b.m)};
+#else
   Transform out = transform_default();
   out.scale = HMM_MulV3(a.scale, b.scale);
   out.rotation = HMM_MulQ(b.rotation, a.rotation);
   out.position = quat_mul_v3(a.rotation, HMM_MulV3(a.scale, b.position));
   out.position = HMM_AddV3(a.position, out.position);
   return out;
+#endif
 }
 
 Transform transform_inverse(Transform t) {
+#ifdef TRANSFORM_USE_MATRICES
+  return (Transform){.m = HMM_InvGeneralM4(t.m)};
+#else
   Transform inv = transform_default();
 
   inv.rotation = HMM_InvQ(t.rotation);
@@ -330,28 +378,41 @@ Transform transform_inverse(Transform t) {
       quat_mul_v3(inv.rotation, HMM_MulV3(inv.scale, inv_translation));
 
   return inv;
+#endif
 }
 
-bool transform_eq(const Transform *a, const Transform *b) {
-  return HMM_EqV3(a->position, b->position) && HMM_EqV3(a->scale, b->scale) &&
-         quat_eq(a->rotation, b->rotation);
-}
+// bool transform_eq(const Transform *a, const Transform *b) {
+//   return HMM_EqV3(a->position, b->position) && HMM_EqV3(a->scale, b->scale)
+//   &&
+//          quat_eq(a->rotation, b->rotation);
+// }
 
 vec3 transform_point(const Transform *t, vec3 p) {
+#ifdef TRANSFORM_USE_MATRICES
+  return mat4_mul_p(t->m, p);
+#else
   vec3 out = vec3_default();
   out = quat_mul_v3(t->rotation, HMM_MulV3(t->scale, p));
   out = HMM_AddV3(t->position, out);
   return out;
+#endif
 }
 
 vec3 transform_vector(const Transform *t, vec3 v) {
+#ifdef TRANSFORM_USE_MATRICES
+  return mat4_mul_v3(t->m, v);
+#else
   vec3 out = vec3_default();
   out = quat_mul_v3(t->rotation, HMM_MulV3(t->scale, v));
   return out;
+#endif
 }
 
 #if 1
 Transform transform_from_mat4_rh(const mat4 *m) {
+#ifdef TRANSFORM_USE_MATRICES
+  return (Transform){.m = *m};
+#else
   Transform out = transform_default();
 
   out.position = HMM_V3(m->Columns[3].X, m->Columns[3].Y, m->Columns[3].Z);
@@ -376,6 +437,7 @@ Transform transform_from_mat4_rh(const mat4 *m) {
   };
 
   return out;
+#endif
 }
 #else
 // float signum(float x) {
@@ -467,12 +529,16 @@ Transform transform_from_mat4(const mat4 *m) {
 
 #if 1
 mat4 transform_to_mat4(Transform t) {
+#ifdef TRANSFORM_USE_MATRICES
+  return t.m;
+#else
   mat4 out;
   out = HMM_Scale(t.scale);
   // NOTE THIS IS FOR LEFT HANDED COORDINATE SYSTEM
   out = HMM_MulM4(HMM_QToM4(t.rotation), out);
   out = HMM_MulM4(HMM_Translate(t.position), out);
   return out;
+#endif
 }
 #else
 // original
@@ -679,19 +745,19 @@ void pose_get_matrix_palette(const Pose *pose, mat4array_t *matrices) {
   }
 }
 
-bool pose_eq(const Pose *a, const Pose *b) {
-  if (a->len != b->len)
-    return false;
+// bool pose_eq(const Pose *a, const Pose *b) {
+//   if (a->len != b->len)
+//     return false;
 
-  for (u32 i = 0; i < a->len; i++) {
-    if (!(transform_eq(&a->joints[i], &b->joints[i]) &&
-          a->parents[i] == b->parents[i])) {
-      return false;
-    }
-  }
+//   for (u32 i = 0; i < a->len; i++) {
+//     if (!(transform_eq(&a->joints[i], &b->joints[i]) &&
+//           a->parents[i] == b->parents[i])) {
+//       return false;
+//     }
+//   }
 
-  return true;
-}
+//   return true;
+// }
 
 // Contains shared data for all instances of a character.
 typedef struct {
@@ -746,16 +812,6 @@ typedef struct {
 
 typedef array_type(BoneMesh) bonemesh_array_t;
 
-#define M4V4D(m, mRow, x, y, z, w)                                             \
-  x *m.Elements[0][mRow] + y *m.Elements[1][mRow] + z *m.Elements[2][mRow] +   \
-      w *m.Elements[3][mRow]
-
-vec3 test_this_way(mat4 m, vec3 v) {
-  return HMM_V3(M4V4D(m, 0, v.X, v.Y, v.Z, 1.0f),
-                M4V4D(m, 1, v.X, v.Y, v.Z, 1.0f),
-                M4V4D(m, 2, v.X, v.Y, v.Z, 1.0f));
-}
-
 void bonemesh_init(BoneMesh *mesh) {
   mesh->positions = NULL;
   mesh->texcoords = NULL;
@@ -804,8 +860,8 @@ void bonemesh_cpu_skin(BoneMesh *mesh, const Skeleton *sk, const Pose *p) {
     // mesh->skinned_normals[i] =
     //     vec4_truncate(HMM_MulM4V4(skin, vec3_to_vec4_vec(mesh->norms[i])));
 
-    mesh->skinned_positions[i] = test_this_way(skin, mesh->positions[i]);
-    mesh->skinned_normals[i] = test_this_way(skin, mesh->norms[i]);
+    mesh->skinned_positions[i] = mat4_mul_p(skin, mesh->positions[i]);
+    mesh->skinned_normals[i] = mat4_mul_v3(skin, mesh->norms[i]);
   }
 }
 
@@ -900,8 +956,10 @@ void bonemesh_from_attribute(BoneMesh *out_mesh, cgltf_attribute *attribute,
     int index = i * component_count;
     switch (attrib_type) {
     case cgltf_attribute_type_position:
-      out_mesh->positions[i] = vec3_convert_handedness(HMM_V3(
-          values.ptr[index], values.ptr[index + 1], values.ptr[index + 2]));
+      // out_mesh->positions[i] = vec3_convert_handedness(HMM_V3(
+      //     values.ptr[index], values.ptr[index + 1], values.ptr[index + 2]));
+      out_mesh->positions[i] = HMM_V3(values.ptr[index], values.ptr[index + 1],
+                                      values.ptr[index + 2]);
       break;
     case cgltf_attribute_type_normal:
       out_mesh->norms[i] = vec3_convert_handedness(HMM_V3(
@@ -1009,17 +1067,36 @@ Transform cgltf_get_local_transform(cgltf_node *n) {
                  n->matrix[12], n->matrix[13], n->matrix[14], n->matrix[15]);
     result = transform_from_mat4_rh(&mat);
   }
-  if (n->has_translation) {
-    result.position =
-        HMM_V3(n->translation[0], n->translation[1], n->translation[2]);
-  }
-  if (n->has_rotation) {
-    result.rotation =
-        HMM_Q(n->rotation[0], n->rotation[1], n->rotation[2], n->rotation[3]);
+  if (n->has_scale) {
+#ifdef TRANSFORM_USE_MATRICES
+    result.m = HMM_MulM4(
+        HMM_Scale(HMM_V3(n->scale[0], n->scale[1], n->scale[2])), result.m);
+#else
+    result.scale = HMM_V3(n->scale[0], n->scale[1], n->scale[2]);
+#endif
   }
 
-  if (n->has_scale) {
-    result.scale = HMM_V3(n->scale[0], n->scale[1], n->scale[2]);
+  if (n->has_rotation) {
+#ifdef TRANSFORM_USE_MATRICES
+    result.m = HMM_MulM4(HMM_QToM4(HMM_Q(n->rotation[0], n->rotation[1],
+                                         n->rotation[2], n->rotation[3])),
+                         result.m);
+#else
+    result.rotation =
+        HMM_Q(n->rotation[0], n->rotation[1], n->rotation[2], n->rotation[3]);
+#endif
+  }
+
+  if (n->has_translation) {
+#ifdef TRANSFORM_USE_MATRICES
+    result.m =
+        HMM_MulM4(HMM_Translate(HMM_V3(n->translation[0], n->translation[1],
+                                       n->translation[2])),
+                  result.m);
+#else
+    result.position =
+        HMM_V3(n->translation[0], n->translation[1], n->translation[2]);
+#endif
   }
 
   return result;
@@ -1249,15 +1326,11 @@ void init(void) {
       .shader = shd,
       .index_type = SG_INDEXTYPE_UINT32,
 #ifdef SOKOL_METAL
-      .face_winding = SG_FACEWINDING_CCW,
+      // .face_winding = SG_FACEWINDING_CCW,
+      // .cull_mode = SG_CULLMODE_BACK,
+      .face_winding = SG_FACEWINDING_CW,
       .cull_mode = SG_CULLMODE_BACK,
 #endif
-      // .face_winding = SG_FACEWINDING_CCW,
-      // .cull_mode = SG_CULLMODE_FRONT,
-      // .face_winding = SG_FACEWINDING_CCW,
-      // .cull_mode = SG_CULLMODE_FRONT,
-      // .face_winding = SG_FACEWINDING_CW,
-      // .cull_mode = SG_CULLMODE_FRONT,
       .depth =
           {
               .write_enabled = true,
@@ -1317,7 +1390,7 @@ void frame(void) {
 #ifdef LEFT_HANDED
 #define ZPOS 5.0
 #else
-#define ZPOS -5.0
+#define ZPOS -10.0
 #endif
 
   state.ry += 1.0f * t;
