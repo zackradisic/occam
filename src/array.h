@@ -118,8 +118,6 @@ void _array_shrink_to_fit(array_t *arr) {
 #define array_pop(T, a) (((T *)(a)->ptr)[--a->len])
 #define array_reserve(T, a, n) _array_reserve((array_t *)(a), sizeof(T), n)
 
-void *reallocate(void *pointer, usize old_size, usize new_size);
-
 #define ARRAY_H_
 
 ASSUME_NONNULL_END

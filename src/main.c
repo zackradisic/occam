@@ -1,5 +1,6 @@
 // For wasm i think turn off?
-#define HANDMADE_MATH_NO_SSE
+// #define HANDMADE_MATH_NO_SSE
+#define HANDMADE_MATH_USE_DEGREES
 
 // #define CPU_SKIN
 
@@ -53,6 +54,8 @@ static inline HMM_Mat4 HMM_Orthographic(float Left, float Right, float Bottom,
 static inline HMM_Mat4 HMM_Perspective(float FOV, float AspectRatio, float Near,
                                        float Far) {
 #ifdef LEFT_HANDED
+  // WHY DOES THIS WORK
+  // return HMM_Perspective_LH_ZO(-FOV, AspectRatio, Near, Far);
   return HMM_Perspective_LH_ZO(FOV, AspectRatio, Near, Far);
 #else
   return HMM_Perspective_RH_NO(FOV, AspectRatio, Near, Far);
@@ -146,10 +149,10 @@ vec3 mat4_mul_p(mat4 m, vec3 v) {
 
 static inline vec3 vec3_convert_handedness(vec3 in) {
 #ifdef LEFT_HANDED
-  // return HMM_V3(in.X, in.Z, -in.Y);
+  // return HMM_V3(in.X, in.Y, -in.Z);
   // return HMM_V3(in.X, in.Y, in.Z);
+  // return HMM_V3(in.X, in.Z, in.Y);
   return HMM_V3(in.X, in.Y, -in.Z);
-  // return HMM_V3(in.X, -in.Y, in.Z);
   // return in;
 #else
   return in;
@@ -306,16 +309,16 @@ void transform_convert_handedness(Transform *t) {
 #ifdef LEFT_HANDED
 #ifdef TRANSFORM_USE_MATRICES
   // Negate the third row
-  // t->m.Elements[2][0] = -t->m.Elements[2][0];
-  // t->m.Elements[2][1] = -t->m.Elements[2][1];
-  // t->m.Elements[2][2] = -t->m.Elements[2][2];
-  // t->m.Elements[2][3] = -t->m.Elements[2][3];
+  t->m.Elements[2][0] = -t->m.Elements[2][0];
+  t->m.Elements[2][1] = -t->m.Elements[2][1];
+  t->m.Elements[2][2] = -t->m.Elements[2][2];
+  t->m.Elements[2][3] = -t->m.Elements[2][3];
 
-  // // Negate the third column
-  // t->m.Elements[0][2] = -t->m.Elements[0][2];
-  // t->m.Elements[1][2] = -t->m.Elements[1][2];
-  // t->m.Elements[2][2] = -t->m.Elements[2][2];
-  // t->m.Elements[3][2] = -t->m.Elements[3][2];
+  // Negate the third column
+  t->m.Elements[0][2] = -t->m.Elements[0][2];
+  t->m.Elements[1][2] = -t->m.Elements[1][2];
+  t->m.Elements[2][2] = -t->m.Elements[2][2];
+  t->m.Elements[3][2] = -t->m.Elements[3][2];
   return;
 #else
   // Converting from right-handed to left-handed coordinate system
@@ -956,14 +959,17 @@ void bonemesh_from_attribute(BoneMesh *out_mesh, cgltf_attribute *attribute,
     int index = i * component_count;
     switch (attrib_type) {
     case cgltf_attribute_type_position:
-      // out_mesh->positions[i] = vec3_convert_handedness(HMM_V3(
-      //     values.ptr[index], values.ptr[index + 1], values.ptr[index + 2]));
-      out_mesh->positions[i] = HMM_V3(values.ptr[index], values.ptr[index + 1],
-                                      values.ptr[index + 2]);
+      out_mesh->positions[i] = vec3_convert_handedness(HMM_V3(
+          values.ptr[index], values.ptr[index + 1], values.ptr[index + 2]));
+      // out_mesh->positions[i] = HMM_V3(values.ptr[index], values.ptr[index +
+      // 1],
+      //                                 values.ptr[index + 2]);
       break;
     case cgltf_attribute_type_normal:
-      out_mesh->norms[i] = vec3_convert_handedness(HMM_V3(
-          values.ptr[index], values.ptr[index + 1], values.ptr[index + 2]));
+      // out_mesh->norms[i] = vec3_convert_handedness(HMM_V3(
+      //     values.ptr[index], values.ptr[index + 1], values.ptr[index + 2]));
+      out_mesh->norms[i] = HMM_V3(values.ptr[index], values.ptr[index + 1],
+                                  values.ptr[index + 2]);
       break;
     case cgltf_attribute_type_texcoord:
       out_mesh->texcoords[i] = HMM_V2(values.ptr[index], values.ptr[index + 1]);
@@ -1164,8 +1170,8 @@ void set_vs_params() {
   const float t = 1.0;
 
   HMM_Mat4 proj = HMM_Perspective(60.0f, w / h, 0.01f, 10.0f);
-  HMM_Mat4 view = HMM_LookAt((HMM_Vec3){.X = 0.0f, .Y = 1.5f, .Z = 6.0f},
-                             (HMM_Vec3){.X = 0.0f, .Y = 0.0f, .Z = 0.0f},
+  HMM_Mat4 view = HMM_LookAt((HMM_Vec3){.X = 0.0f, .Y = 0.0f, .Z = 0.0f},
+                             (HMM_Vec3){.X = 0.0f, .Y = 1.5f, .Z = 6.0f},
                              (HMM_Vec3){.X = 0.0f, .Y = 1.0f, .Z = 0.0f});
   state.rx += 1.0f * t;
   state.ry += 2.0f * t;
@@ -1212,21 +1218,18 @@ void init(void) {
     printf("Failed to parse scene\n");
     exit(1);
   }
-  printf("Parsed file\n");
 
   if (cgltf_load_buffers(&opts, data, path) != cgltf_result_success) {
     cgltf_free(data);
     printf("Failed to load buffers\n");
     exit(1);
   }
-  printf("Loaded buffers\n");
 
   if (cgltf_validate(data) != cgltf_result_success) {
     cgltf_free(data);
     printf("glTF data validation failed!\n");
     exit(1);
   }
-  printf("Validated glTF\n");
 
   bonemesh_array_t meshes = bonemesh_load_meshes(data);
   state.bm = meshes.ptr[0];
@@ -1244,9 +1247,6 @@ void init(void) {
     float result = weights.X + weights.Y + weights.Z + weights.W;
     safecheckf(float_eq(result, 1.0), "got: %f\n", result);
   }
-
-  printf("VERTICES LEN: %d\n", state.bm.vertices_len);
-  printf("INDICES LEN: %zu\n", state.bm.indices.len);
 
 #ifdef CPU_SKIN
   bonemesh_cpu_skin(&state.bm, &state.sk, &state.animated_pose);
@@ -1326,9 +1326,12 @@ void init(void) {
       .shader = shd,
       .index_type = SG_INDEXTYPE_UINT32,
 #ifdef SOKOL_METAL
-      // .face_winding = SG_FACEWINDING_CCW,
-      // .cull_mode = SG_CULLMODE_BACK,
-      .face_winding = SG_FACEWINDING_CW,
+      .face_winding = SG_FACEWINDING_CCW,
+      .cull_mode = SG_CULLMODE_BACK,
+  // .face_winding = SG_FACEWINDING_CW,
+  // .cull_mode = SG_CULLMODE_BACK,
+#else
+      .face_winding = SG_FACEWINDING_CCW,
       .cull_mode = SG_CULLMODE_BACK,
 #endif
       .depth =
@@ -1370,28 +1373,34 @@ void frame(void) {
   const float h = sapp_heightf();
 
   fs_params_t fs_params;
-  fs_params.light[0] = 1.0;
-  fs_params.light[1] = 1.0;
-  fs_params.light[2] = 1.0;
-
-  //   const float t = (float)(sapp_frame_duration() * 60.0);
-  const float t = (float)(sapp_frame_duration());
-
-  // HMM_Mat4 proj = HMM_Perspective(50.0, w / h, 0.01f, 1000.0f);
-  // HMM_Mat4 view = HMM_LookAt((HMM_Vec3){.X = 0.0f, .Y = 5.0f, .Z = 7.0f},
-  //                            (HMM_Vec3){.X = 0.0f, .Y = 3.0f, .Z = 0.0f},
-  //                            (HMM_Vec3){.X = 0.0f, .Y = 1.0f, .Z = 0.0f});
-
-  const float aspect_ratio = w / h;
-  HMM_Mat4 proj =
-      HMM_Orthographic(-aspect_ratio, aspect_ratio, -1, 1, 0.001, 1000);
-  HMM_Mat4 view = HMM_M4D(1.0);
+  fs_params.light[0] = 0.0;
+  fs_params.light[1] = -1.0;
+#ifdef LEFT_HANDED
+  fs_params.light[2] = 0.0;
+#else
+  fs_params.light[2] = 0.0;
+#endif
 
 #ifdef LEFT_HANDED
-#define ZPOS 5.0
+#define ZPOS 4.1
+#define ZCAMERAPOS 6.1
 #else
-#define ZPOS -10.0
+#define ZPOS -0.1
+#define ZCAMERAPOS 3.1
 #endif
+
+  const float t = (float)(sapp_frame_duration() * 60.0);
+  // const float t = (float)(sapp_frame_duration());
+
+  HMM_Mat4 proj = HMM_Perspective(90.0, w / h, 0.1f, 100.0f);
+  HMM_Mat4 view = HMM_LookAt((HMM_Vec3){.X = 0.0f, .Y = 0.0f, .Z = ZCAMERAPOS},
+                             (HMM_Vec3){.X = 0.0f, .Y = 0.0f, .Z = 0.0f},
+                             (HMM_Vec3){.X = 0.0f, .Y = 1.0f, .Z = 0.0f});
+
+  // const float aspect_ratio = w / h;
+  // HMM_Mat4 proj =
+  //     HMM_Orthographic(-aspect_ratio, aspect_ratio, -1, 1, 0.0001, 1000);
+  // HMM_Mat4 view = HMM_M4D(1.0);
 
   state.ry += 1.0f * t;
   state.rx += 1.0f * t;
@@ -1399,7 +1408,7 @@ void frame(void) {
   HMM_Mat4 rxm = HMM_Rotate(state.rx, (HMM_Vec3){{1.0f, 0.0f, 0.0f}});
   HMM_Mat4 model =
       HMM_MulM4(HMM_Translate(HMM_V3(0.0, -0.5, ZPOS)),
-                HMM_MulM4(rym, HMM_Scale(HMM_V3(0.25, 0.25, 0.25))));
+                HMM_MulM4(rym, HMM_Scale(HMM_V3(0.25, 0.25, .25))));
 
   // HMM_Mat4 model = HMM_Translate(HMM_MulM4(rym, HMM_Scale(HMM_V3(0.25, 0.25,
   // 0.25)));
@@ -1442,6 +1451,18 @@ void cleanup(void) { sg_shutdown(); }
 sapp_desc sokol_main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
+
+#ifdef SOKOL_METAL
+  printf("Using Metal\n");
+#else
+  printf("Using OpenGL\n");
+#endif
+
+#ifdef CPU_SKIN
+  printf("Using CPU skinning\n");
+#else
+  printf("Using GPU skinning\n");
+#endif
 
   return (sapp_desc){
       .init_cb = init,
