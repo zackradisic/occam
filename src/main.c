@@ -152,8 +152,8 @@ static inline vec3 vec3_convert_handedness(vec3 in) {
   // return HMM_V3(in.X, in.Y, -in.Z);
   // return HMM_V3(in.X, in.Y, in.Z);
   // return HMM_V3(in.X, in.Z, in.Y);
-  return HMM_V3(in.X, in.Y, -in.Z);
-  // return in;
+  // return HMM_V3(in.X, in.Y, -in.Z);
+  return in;
 #else
   return in;
 #endif
@@ -303,22 +303,32 @@ typedef struct {
 Transform cgltf_get_local_transform(cgltf_node *n);
 void transform_convert_handedness(Transform *t);
 
+const mat4 MAT4_CONVERT_HAND = {.Elements = {
+                                    {1, 0, 0},
+                                    {0, 0, 1},
+                                    {0, 1, 0},
+                                }};
+
 // This function should be called whenever we create a transform from glTF
 // values, this is because glTF uses a right handed coordinate system.
 void transform_convert_handedness(Transform *t) {
 #ifdef LEFT_HANDED
 #ifdef TRANSFORM_USE_MATRICES
-  // Negate the third row
-  t->m.Elements[2][0] = -t->m.Elements[2][0];
-  t->m.Elements[2][1] = -t->m.Elements[2][1];
-  t->m.Elements[2][2] = -t->m.Elements[2][2];
-  t->m.Elements[2][3] = -t->m.Elements[2][3];
+  // // Step 1: Flip the Z-axis
+  // t->m.Columns[2].X = -t->m.Columns[2].X;
+  // t->m.Columns[2].Y = -t->m.Columns[2].Y;
+  // t->m.Columns[2].Z = -t->m.Columns[2].Z;
+  // t->m.Columns[2].W = -t->m.Columns[2].W;
 
-  // Negate the third column
-  t->m.Elements[0][2] = -t->m.Elements[0][2];
-  t->m.Elements[1][2] = -t->m.Elements[1][2];
-  t->m.Elements[2][2] = -t->m.Elements[2][2];
-  t->m.Elements[3][2] = -t->m.Elements[3][2];
+  // // Step 2: Reverse the rotation direction
+  // // This is done by negating the off-diagonal elements in the 3x3 upper-left
+  // // submatrix
+  // t->m.Elements[0][1] = -t->m.Elements[0][1];
+  // t->m.Elements[0][2] = -t->m.Elements[0][2];
+  // t->m.Elements[1][0] = -t->m.Elements[1][0];
+  // t->m.Elements[1][2] = -t->m.Elements[1][2];
+  // t->m.Elements[2][0] = -t->m.Elements[2][0];
+  // t->m.Elements[2][1] = -t->m.Elements[2][1];
   return;
 #else
   // Converting from right-handed to left-handed coordinate system
@@ -959,8 +969,8 @@ void bonemesh_from_attribute(BoneMesh *out_mesh, cgltf_attribute *attribute,
     int index = i * component_count;
     switch (attrib_type) {
     case cgltf_attribute_type_position:
-      out_mesh->positions[i] = vec3_convert_handedness(HMM_V3(
-          values.ptr[index], values.ptr[index + 1], values.ptr[index + 2]));
+      out_mesh->positions[i] = HMM_V3(values.ptr[index], values.ptr[index + 1],
+                                      values.ptr[index + 2]);
       // out_mesh->positions[i] = HMM_V3(values.ptr[index], values.ptr[index +
       // 1],
       //                                 values.ptr[index + 2]);
@@ -968,8 +978,15 @@ void bonemesh_from_attribute(BoneMesh *out_mesh, cgltf_attribute *attribute,
     case cgltf_attribute_type_normal:
       // out_mesh->norms[i] = vec3_convert_handedness(HMM_V3(
       //     values.ptr[index], values.ptr[index + 1], values.ptr[index + 2]));
-      out_mesh->norms[i] = HMM_V3(values.ptr[index], values.ptr[index + 1],
+      // out_mesh->norms[i] = HMM_V3(values.ptr[index], values.ptr[index + 1],
+      //                             values.ptr[index + 2]);
+      out_mesh->norms[i] = HMM_V3(values.ptr[index], -values.ptr[index + 1],
                                   values.ptr[index + 2]);
+      if (HMM_LenSqrV3(out_mesh->norms[i]) < 0.000001f) {
+        out_mesh->norms[i] = HMM_V3(0, 1, 0);
+      } else {
+        out_mesh->norms[i] = HMM_NormV3(out_mesh->norms[i]);
+      }
       break;
     case cgltf_attribute_type_texcoord:
       out_mesh->texcoords[i] = HMM_V2(values.ptr[index], values.ptr[index + 1]);
@@ -1326,7 +1343,7 @@ void init(void) {
       .shader = shd,
       .index_type = SG_INDEXTYPE_UINT32,
 #ifdef SOKOL_METAL
-      .face_winding = SG_FACEWINDING_CCW,
+      .face_winding = SG_FACEWINDING_CW,
       .cull_mode = SG_CULLMODE_BACK,
   // .face_winding = SG_FACEWINDING_CW,
   // .cull_mode = SG_CULLMODE_BACK,
@@ -1374,33 +1391,34 @@ void frame(void) {
 
   fs_params_t fs_params;
   fs_params.light[0] = 0.0;
-  fs_params.light[1] = -1.0;
+  fs_params.light[1] = 0.0;
 #ifdef LEFT_HANDED
-  fs_params.light[2] = 0.0;
+  fs_params.light[2] = -1.0;
 #else
-  fs_params.light[2] = 0.0;
+  fs_params.light[2] = 1.0;
 #endif
 
 #ifdef LEFT_HANDED
 #define ZPOS 4.1
 #define ZCAMERAPOS 6.1
 #else
-#define ZPOS -0.1
+#define ZPOS -1.1
 #define ZCAMERAPOS 3.1
 #endif
 
   const float t = (float)(sapp_frame_duration() * 60.0);
   // const float t = (float)(sapp_frame_duration());
 
-  HMM_Mat4 proj = HMM_Perspective(90.0, w / h, 0.1f, 100.0f);
-  HMM_Mat4 view = HMM_LookAt((HMM_Vec3){.X = 0.0f, .Y = 0.0f, .Z = ZCAMERAPOS},
-                             (HMM_Vec3){.X = 0.0f, .Y = 0.0f, .Z = 0.0f},
-                             (HMM_Vec3){.X = 0.0f, .Y = 1.0f, .Z = 0.0f});
+  // HMM_Mat4 proj = HMM_Perspective(90.0, w / h, 0.1f, 100.0f);
+  // HMM_Mat4 view = HMM_LookAt((HMM_Vec3){.X = 0.0f, .Y = 0.0f, .Z =
+  // ZCAMERAPOS},
+  //                            (HMM_Vec3){.X = 0.0f, .Y = 0.0f, .Z = 0.0f},
+  //                            (HMM_Vec3){.X = 0.0f, .Y = 1.0f, .Z = 0.0f});
 
-  // const float aspect_ratio = w / h;
-  // HMM_Mat4 proj =
-  //     HMM_Orthographic(-aspect_ratio, aspect_ratio, -1, 1, 0.0001, 1000);
-  // HMM_Mat4 view = HMM_M4D(1.0);
+  const float aspect_ratio = w / h;
+  HMM_Mat4 proj =
+      HMM_Orthographic(-aspect_ratio, aspect_ratio, -1, 1, 0.0001, 1000);
+  HMM_Mat4 view = HMM_M4D(1.0);
 
   state.ry += 1.0f * t;
   state.rx += 1.0f * t;
@@ -1409,19 +1427,6 @@ void frame(void) {
   HMM_Mat4 model =
       HMM_MulM4(HMM_Translate(HMM_V3(0.0, -0.5, ZPOS)),
                 HMM_MulM4(rym, HMM_Scale(HMM_V3(0.25, 0.25, .25))));
-
-  // HMM_Mat4 model = HMM_Translate(HMM_MulM4(rym, HMM_Scale(HMM_V3(0.25, 0.25,
-  // 0.25)));
-
-  // model = HMM_M4D(1.0);
-
-  // HMM_Mat4 model = HMM_MulM4(HMM_Translate(HMM_V3(-0.0, 0.0, -10.5)),
-  //                            HMM_Scale(HMM_V3(.1, .1, .1)));
-
-  // HMM_Mat4 model = HMM_MulM4(
-  //     HMM_Translate(HMM_V3(-0.0, 0.0, -5.5)),
-  //     //  HMM_Scale(HMM_V3(0.5, 0.5, 0.5)));
-  //     HMM_MulM4(HMM_MulM4(rxm, rym), HMM_Scale(HMM_V3(0.1, 0.1, 0.1))));
 
   state.vs_params.model = model;
   state.vs_params.view = view;

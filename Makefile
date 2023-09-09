@@ -34,6 +34,9 @@ src/shaders/bonemesh.glsl.h: src/shaders/bonemesh.glsl
 src/shaders/bonemesh_cpu.glsl.h: src/shaders/bonemesh_cpu.glsl
 	cd /Users/zackradisic/Code/sokol-tools-workspace/sokol-tools; ./fips run sokol-shdc -- -i /Users/zackradisic/Code/occam/$< -o /Users/zackradisic/Code/occam/$@ -l glsl330:metal_macos:hlsl4 -f sokol
 
+bonemesh: src/shaders/bonemesh.glsl.h
+bonemesh_cpu: src/shaders/bonemesh_cpu.glsl.h
+
 # $(OUT_DIR)/sokol.o: src/sokol.h 
 # 	$(CC) $(LD_FLAGS) -ObjC -o $@ -c $<
 
