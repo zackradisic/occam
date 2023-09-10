@@ -1,5 +1,5 @@
 // For wasm i think turn off?
-// #define HANDMADE_MATH_NO_SSE
+#define HANDMADE_MATH_NO_SSE
 #define HANDMADE_MATH_USE_DEGREES
 
 // #define CPU_SKIN
@@ -159,8 +159,6 @@ static inline vec3 vec3_convert_handedness(bool is_point, vec3 in) {
   return mat4_mul_v3(MAT4_CONVERT_HAND, in);
 
   return in;
-#else
-  return in;
 #endif
 }
 
@@ -221,6 +219,10 @@ void convertm4(mat4 *m) {
 #endif
 }
 
+static inline quat quat_new(float X, float Y, float Z, float W) {
+  return HMM_Q(X, Y, Z, W);
+}
+
 #if 0
 vec3 quat_mul_v3(quat q, vec3 v) {
   // 	return    q.vector * 2.0f * dot(q.vector, v) +
@@ -248,16 +250,201 @@ vec3 quat_mul_v3(quat q, vec3 v) {
   return out;
 }
 #else
-vec3 quat_mul_v3(quat q, vec3 v) {
-  // 	return    q.vector * 2.0f * dot(q.vector, v) +
-  //   v *(q.scalar * q.scalar - dot(q.vector, q.vector)) +
-  //       cross(q.vector, v) * 2.0f * q.scalar;
-  vec3 out;
+HMM_Vec3 quat_mul_v3(quat q, HMM_Vec3 v) {
+  float dotVector = HMM_DotV3(q.XYZ, v);
+  HMM_Vec3 term1 = HMM_MulV3F(q.XYZ, 2.0f * dotVector);
+  HMM_Vec3 term2 = HMM_MulV3F(v, (q.W * q.W - HMM_DotV3(q.XYZ, q.XYZ)));
+  HMM_Vec3 term3 = HMM_MulV3F(HMM_Cross(q.XYZ, v), 2.0f * q.W);
 
-  out = HMM_MulV3F(HMM_MulV3F(q.XYZ, 2.0), HMM_DotV3(q.XYZ, v));
-  out = HMM_AddV3(out, HMM_MulV3F(v, q.W * q.W - HMM_DotV3(q.XYZ, q.XYZ)));
-  out = HMM_AddV3(out, HMM_MulV3F(HMM_MulV3F(HMM_Cross(q.XYZ, v), 2.0), q.W));
-  return out;
+  HMM_Vec3 result = HMM_AddV3(HMM_AddV3(term1, term2), term3);
+  return result;
+}
+// vec3 quat_mul_v3(quat q, vec3 v) {
+//   // 	return    q.vector * 2.0f * dot(q.vector, v) +
+//   //   v *(q.scalar * q.scalar - dot(q.vector, q.vector)) +
+//   //       cross(q.vector, v) * 2.0f * q.scalar;
+//   vec3 out;
+
+//   out = HMM_MulV3F(HMM_MulV3F(q.XYZ, 2.0), HMM_DotV3(q.XYZ, v));
+//   out = HMM_AddV3(out, HMM_MulV3F(v, q.W * q.W - HMM_DotV3(q.XYZ, q.XYZ)));
+//   out = HMM_AddV3(out, HMM_MulV3F(HMM_MulV3F(HMM_Cross(q.XYZ, v), 2.0),
+//   q.W)); return out;
+// }
+#endif
+
+#define NO_HANDMADE_QUAT_IMPL
+#ifdef NO_HANDMADE_QUAT_IMPL
+quat quat_default() { return HMM_Q(0, 0, 0, 1); }
+
+quat quat_mul_quat(quat Q1, quat Q2) {
+  return quat_new(Q2.X * Q1.W + Q2.Y * Q1.Z - Q2.Z * Q1.Y + Q2.W * Q1.X,
+                  -Q2.X * Q1.Z + Q2.Y * Q1.W + Q2.Z * Q1.X + Q2.W * Q1.Y,
+                  Q2.X * Q1.Y - Q2.Y * Q1.X + Q2.Z * Q1.W + Q2.W * Q1.Z,
+                  -Q2.X * Q1.X - Q2.Y * Q1.Y - Q2.Z * Q1.Z + Q2.W * Q1.W);
+}
+
+quat quat_inverse(quat q) {
+  float lenSq = q.X * q.X + q.Y * q.Y + q.Z * q.Z + q.W * q.W;
+  if (lenSq < QUAT_EPSILON) {
+    return quat_default();
+  }
+  float recip = 1.0f / lenSq;
+
+  // conjugate / norm
+  return HMM_Q(-q.X * recip, -q.Y * recip, -q.Z * recip, q.W * recip);
+}
+
+quat quat_from_to(vec3 from, vec3 to) {
+  HMM_Vec3 f = HMM_NormV3(from);
+  HMM_Vec3 t = HMM_NormV3(to);
+
+  if (HMM_LenSqrV3(HMM_SubV3(f, t)) < 1e-6) {
+    return HMM_Q(0.0f, 0.0f, 0.0f, 1.0f);
+  } else if (HMM_LenSqrV3(HMM_SubV3(f, HMM_MulV3F(t, -1.0f))) < 1e-6) {
+    HMM_Vec3 ortho = HMM_V3(1.0f, 0.0f, 0.0f);
+
+    if (fabsf(f.Y) < fabsf(f.X)) {
+      ortho = HMM_V3(0.0f, 1.0f, 0.0f);
+    }
+    if (fabsf(f.Z) < fabs(f.Y) && fabs(f.Z) < fabsf(f.X)) {
+      ortho = HMM_V3(0.0f, 0.0f, 1.0f);
+    }
+
+    HMM_Vec3 axis = HMM_NormV3(HMM_Cross(f, ortho));
+    return HMM_Q(axis.X, axis.Y, axis.Z, 0.0f);
+  }
+
+  HMM_Vec3 half = HMM_NormV3(HMM_AddV3(f, t));
+  HMM_Vec3 axis = HMM_Cross(f, half);
+
+  return HMM_Q(axis.X, axis.Y, axis.Z, HMM_DotV3(f, half));
+}
+
+quat quat_look_rotation(vec3 dir, vec3 up) {
+  // Normalize the input vectors
+  HMM_Vec3 f = HMM_NormV3(dir);
+  HMM_Vec3 u = HMM_NormV3(up);
+
+  // Find orthonormal basis vectors
+  HMM_Vec3 r = HMM_Cross(u, f);
+  u = HMM_Cross(f, r);
+
+  // From world forward to object forward
+  HMM_Quat f2d = quat_from_to(HMM_V3(0, 0, 1), f);
+
+  // What direction is the new object up?
+  HMM_Vec3 objectUp = quat_mul_v3(f2d, HMM_V3(0, 1, 0));
+
+  // From object up to desired up
+  HMM_Quat u2u = quat_from_to(objectUp, u);
+
+  // Rotate to forward direction first, then twist to correct up
+  HMM_Quat result = quat_mul_quat(f2d, u2u);
+
+  // Don't forget to normalize the result
+  result = HMM_NormQ(result);
+
+  return result;
+}
+mat4 quat_to_mat4(quat q) {
+#ifdef LEFT_HANDED
+  return (mat4){
+      .Elements = {
+          {1 - 2 * q.Y * q.Y - 2 * q.Z * q.Z, 2 * q.X * q.Y + 2 * q.W * q.Z,
+           2 * q.X * q.Z - 2 * q.W * q.Y, 0},
+          {2 * q.X * q.Y - 2 * q.W * q.Z, 1 - 2 * q.X * q.X - 2 * q.Z * q.Z,
+           2 * q.Y * q.Z + 2 * q.W * q.X, 0},
+          {2 * q.X * q.Z + 2 * q.W * q.Y, 2 * q.Y * q.Z - 2 * q.W * q.X,
+           1 - 2 * q.X * q.X - 2 * q.Y * q.Y, 0},
+          {0, 0, 0, 1}}};
+#else
+  vec3 r = quat_mul_v3(q, HMM_V3(1, 0, 0));
+  vec3 u = quat_mul_v3(q, HMM_V3(0, 1, 0));
+  vec3 f = quat_mul_v3(q, HMM_V3(0, 0, 1));
+
+  return mat4_new(r.X, r.Y, r.Z, 0, u.X, u.Y, u.Z, 0, f.X, f.Y, f.Z, 0, 0, 0, 0,
+                  1);
+#endif
+}
+quat quat_from_mat4_rh(mat4 m) {
+  vec3 up = HMM_NormV3(HMM_V3(m.Columns[1].X, m.Columns[1].Y, m.Columns[1].Z));
+  vec3 forward =
+      HMM_NormV3(HMM_V3(m.Columns[2].X, m.Columns[2].Y, m.Columns[2].Z));
+  vec3 right = HMM_Cross(up, forward);
+  up = HMM_Cross(forward, right);
+
+  return quat_look_rotation(forward, up);
+}
+#else
+
+quat quat_mul_quat(quat Q1, quat Q2) { return HMM_MulQ(Q2, Q1); }
+quat quat_inverse(quat q) { return HMM_InvQ(q); }
+
+mat4 quat_to_mat4(quat q) { return HMM_QToM4(q); }
+// quat quat_from_mat4_rh(mat4 m) { return HMM_M4ToQ_RH(m); }
+
+quat quat_from_to(vec3 from, vec3 to) {
+  HMM_Vec3 f = HMM_NormV3(from);
+  HMM_Vec3 t = HMM_NormV3(to);
+
+  if (HMM_LenSqrV3(HMM_SubV3(f, t)) < 1e-6) {
+    return HMM_Q(0.0f, 0.0f, 0.0f, 1.0f);
+  } else if (HMM_LenSqrV3(HMM_SubV3(f, HMM_MulV3F(t, -1.0f))) < 1e-6) {
+    HMM_Vec3 ortho = HMM_V3(1.0f, 0.0f, 0.0f);
+
+    if (fabsf(f.Y) < fabsf(f.X)) {
+      ortho = HMM_V3(0.0f, 1.0f, 0.0f);
+    }
+    if (fabsf(f.Z) < fabs(f.Y) && fabs(f.Z) < fabsf(f.X)) {
+      ortho = HMM_V3(0.0f, 0.0f, 1.0f);
+    }
+
+    HMM_Vec3 axis = HMM_NormV3(HMM_Cross(f, ortho));
+    return HMM_Q(axis.X, axis.Y, axis.Z, 0.0f);
+  }
+
+  HMM_Vec3 half = HMM_NormV3(HMM_AddV3(f, t));
+  HMM_Vec3 axis = HMM_Cross(f, half);
+
+  return HMM_Q(axis.X, axis.Y, axis.Z, HMM_DotV3(f, half));
+}
+
+quat quat_look_rotation(vec3 dir, vec3 up) {
+  // Normalize the input vectors
+  HMM_Vec3 f = HMM_NormV3(dir);
+  HMM_Vec3 u = HMM_NormV3(up);
+
+  // Find orthonormal basis vectors
+  HMM_Vec3 r = HMM_Cross(u, f);
+  u = HMM_Cross(f, r);
+
+  // From world forward to object forward
+  HMM_Quat f2d = quat_from_to(HMM_V3(0, 0, 1), f);
+
+  // What direction is the new object up?
+  HMM_Vec3 objectUp = quat_mul_v3(f2d, HMM_V3(0, 1, 0));
+
+  // From object up to desired up
+  HMM_Quat u2u = quat_from_to(objectUp, u);
+
+  // Rotate to forward direction first, then twist to correct up
+  HMM_Quat result = quat_mul_quat(f2d, u2u);
+
+  // Don't forget to normalize the result
+  result = HMM_NormQ(result);
+
+  return result;
+}
+
+quat quat_from_mat4_rh(mat4 m) {
+  // return HMM_M4ToQ_RH(m);
+  vec3 up = HMM_NormV3(HMM_V3(m.Columns[1].X, m.Columns[1].Y, m.Columns[1].Z));
+  vec3 forward =
+      HMM_NormV3(HMM_V3(m.Columns[2].X, m.Columns[2].Y, m.Columns[2].Z));
+  vec3 right = HMM_Cross(up, forward);
+  up = HMM_Cross(forward, right);
+
+  return quat_look_rotation(forward, up);
 }
 #endif
 
@@ -294,7 +481,7 @@ vec3 vec4_truncate(vec4 p) {
   };
 }
 
-#define TRANSFORM_USE_MATRICES
+// #define TRANSFORM_USE_MATRICES
 typedef struct {
 #ifdef TRANSFORM_USE_MATRICES
   mat4 m;
@@ -309,11 +496,12 @@ Transform cgltf_get_local_transform(cgltf_node *n);
 // To convert:
 // you could also look at the matrix math, in a right handed coordinate system
 // you get `posWorld = matToWorld*matAnim*vertModel` but instead you have a
-// `matToWorld` in left handed and want the result in left handed. So you need a
-// `posWorld = matToWorld*matToLeft*matAnim*vertModel` but you want that
+// `matToWorld` in left handed and want the result in left handed. So you need
+// a `posWorld = matToWorld*matToLeft*matAnim*vertModel` but you want that
 // `matToLeft` to be integrated in both the `matAnim` and `vertModel` to that
 // end you can do `matAnimLeftHanded = matToLeft*matAnim*matToRight` and have
-// `vertModelLeftHanded = matToLeft*vertModel` and because `matToRight*matToLeft
+// `vertModelLeftHanded = matToLeft*vertModel` and because
+// `matToRight*matToLeft
 // == matIdentity` that will cancel out and make `posWorld =
 // matToWorld*matAnimeftHanded*vertModelLeftHanded` end up as `posWorld =
 // matToWorld*matToLeft*matAnim*vertModel` from:
@@ -328,17 +516,12 @@ void transform_convert_handedness(Transform *t) {
 #ifdef TRANSFORM_USE_MATRICES
   t->m = HMM_MulM4(MAT4_CONVERT_HAND, HMM_MulM4(t->m, MAT4_CONVERT_HAND));
 #else
-  // Converting from right-handed to left-handed coordinate system
-  t->position = vec3_convert_handedness(true, t->position);
-  t->scale = vec3_convert_handedness(false, t->scale);
-  // t->rotation = (quat){.W = t->rotation.W,
-  //                      .X = -t->rotation.X,
-  //                      .Y = -t->rotation.Y,
-  //                      .Z = t->rotation.Z};
-  t->rotation = (quat){.W = t->rotation.W,
-                       .X = -t->rotation.X,
-                       .Y = -t->rotation.Y,
-                       .Z = t->rotation.Z};
+  mat4 m = quat_to_mat4(t->rotation);
+  m = HMM_MulM4(MAT4_CONVERT_HAND, HMM_MulM4(m, MAT4_CONVERT_HAND));
+
+  t->rotation = quat_from_mat4_rh(m);
+  t->position.Z *= -1;
+
 #endif
 #else
   // Assuming it's already in a right-handed coordinate system, so do nothing.
@@ -351,7 +534,7 @@ Transform transform_default() {
   out.m = HMM_M4D(1.0);
 #else
   out.position = HMM_V3(0, 0, 0);
-  out.rotation = HMM_Q(0, 0, 0, 1);
+  out.rotation = quat_new(0, 0, 0, 1);
   out.scale = HMM_V3(1, 1, 1);
 #endif
   return out;
@@ -364,7 +547,7 @@ Transform transform_combine(Transform a, Transform b) {
 #else
   Transform out = transform_default();
   out.scale = HMM_MulV3(a.scale, b.scale);
-  out.rotation = HMM_MulQ(b.rotation, a.rotation);
+  out.rotation = quat_mul_quat(b.rotation, a.rotation);
   out.position = quat_mul_v3(a.rotation, HMM_MulV3(a.scale, b.position));
   out.position = HMM_AddV3(a.position, out.position);
   return out;
@@ -377,7 +560,7 @@ Transform transform_inverse(Transform t) {
 #else
   Transform inv = transform_default();
 
-  inv.rotation = HMM_InvQ(t.rotation);
+  inv.rotation = quat_inverse(t.rotation);
 
   inv.scale.X = fabs(t.scale.X) < VEC3_EPSILON ? 0.0f : 1.0f / t.scale.X;
   inv.scale.Y = fabs(t.scale.Y) < VEC3_EPSILON ? 0.0f : 1.0f / t.scale.Y;
@@ -418,7 +601,6 @@ vec3 transform_vector(const Transform *t, vec3 v) {
 #endif
 }
 
-#if 1
 Transform transform_from_mat4_rh(const mat4 *m) {
 #ifdef TRANSFORM_USE_MATRICES
   return (Transform){.m = *m};
@@ -426,7 +608,8 @@ Transform transform_from_mat4_rh(const mat4 *m) {
   Transform out = transform_default();
 
   out.position = HMM_V3(m->Columns[3].X, m->Columns[3].Y, m->Columns[3].Z);
-  out.rotation = HMM_M4ToQ_RH(*m);
+  // out.rotation = HMM_M4ToQ_RH(*m);
+  out.rotation = quat_from_mat4_rh(*m);
 
   mat4 rot_scale_mat =
       mat4_new(m->Columns[0].X, m->Columns[0].Y, m->Columns[0].Z, 0, // col 1
@@ -434,13 +617,10 @@ Transform transform_from_mat4_rh(const mat4 *m) {
                m->Columns[2].X, m->Columns[2].Y, m->Columns[2].Z, 0, //
                0, 0, 0, 1);
 
-  mat4 inv_rot_mat = HMM_QToM4(HMM_InvQ(out.rotation));
+  mat4 inv_rot_mat = quat_to_mat4(quat_inverse(out.rotation));
   mat4 scale_skew_mat = HMM_MulM4(rot_scale_mat, inv_rot_mat);
 
   out.scale = (vec3){
-      // scale_skew_mat.Elements[0][0],
-      // scale_skew_mat.Elements[1][1],
-      // scale_skew_mat.Elements[2][2],
       scale_skew_mat.Columns[0].X,
       scale_skew_mat.Columns[1].Y,
       scale_skew_mat.Columns[2].Z,
@@ -449,138 +629,23 @@ Transform transform_from_mat4_rh(const mat4 *m) {
   return out;
 #endif
 }
-#else
-// float signum(float x) {
-//   if (x > 0.0f)
-//     return 1;
-//   if (x < 0.0f)
-//     return -1;
-//   return 0;
-// }
-float signum(float x) {
-  float epsilon = 1e-6; // Choose a small value that suits your needs
-  if (x > epsilon)
-    return 1.0f;
-  if (x < -epsilon)
-    return -1.0f;
-  return 0.0f;
-}
 
-float mat3_trace(const mat3 *m) {
-  return m->Columns[0].X + m->Columns[1].Y + m->Columns[2].Z;
-}
-
-quat mat3_to_quat(mat3 m) {
-  float trace = mat3_trace(&m);
-  if (trace >= 0.0f) {
-    float s = sqrtf(1.0f + trace) * 2.0f;
-    float invS = 1.0f / s;
-    float x = (m.Columns[2].Y - m.Columns[1].Z) * invS;
-    float y = (m.Columns[0].Z - m.Columns[2].X) * invS;
-    float z = (m.Columns[1].X - m.Columns[0].Y) * invS;
-    float w = 0.25f * s;
-    return HMM_Q(x, y, z, w);
-  } else if (m.Columns[0].X > m.Columns[1].Y &&
-             m.Columns[0].X > m.Columns[2].Z) {
-    float s =
-        sqrtf(1.0f + m.Columns[0].X - m.Columns[1].Y - m.Columns[2].Z) * 2.0f;
-    float invS = 1.0f / s;
-    float x = 0.25f * s;
-    float y = (m.Columns[0].Y + m.Columns[1].X) * invS;
-    float z = (m.Columns[0].Z + m.Columns[2].X) * invS;
-    float w = (m.Columns[2].Y - m.Columns[1].Z) * invS;
-    return HMM_Q(x, y, z, w);
-  } else if (m.Columns[1].Y > m.Columns[2].Z) {
-    float s =
-        sqrtf(1.0f + m.Columns[1].Y - m.Columns[0].X - m.Columns[2].Z) * 2.0f;
-    float invS = 1.0f / s;
-    float x = (m.Columns[0].Y + m.Columns[1].X) * invS;
-    float y = 0.25f * s;
-    float z = (m.Columns[1].Z + m.Columns[2].Y) * invS;
-    float w = (m.Columns[0].Z - m.Columns[2].X) * invS;
-    return HMM_Q(x, y, z, w);
-  } else {
-    float s =
-        sqrtf(1.0f + m.Columns[2].Z - m.Columns[0].X - m.Columns[1].Y) * 2.0f;
-    float invS = 1.0f / s;
-    float x = (m.Columns[0].Z + m.Columns[2].X) * invS;
-    float y = (m.Columns[1].Z + m.Columns[2].Y) * invS;
-    float z = 0.25f * s;
-    float w = (m.Columns[1].X - m.Columns[0].Y) * invS;
-    return HMM_Q(x, y, z, w);
-  }
-}
-
-Transform transform_from_mat4(const mat4 *m) {
-  Transform result = transform_default();
-  vec3 translation =
-      HMM_V3(m->Elements[3][0], m->Elements[3][1], m->Elements[3][2]);
-  mat3 i = {
-      .Elements = {{m->Elements[0][0], m->Elements[0][1], m->Elements[0][2]},
-                   {m->Elements[1][0], m->Elements[1][1], m->Elements[1][2]},
-                   {m->Elements[2][0], m->Elements[2][1], m->Elements[2][2]}}};
-
-  float sx = HMM_LenV3(i.Columns[0]);
-  float sy = HMM_LenV3(i.Columns[1]);
-  float sz = signum(HMM_DeterminantM3(i)) * HMM_LenV3(i.Columns[2]);
-  vec3 scale = HMM_V3(sx, sy, sz);
-  i.Columns[0] = HMM_MulV3F(i.Columns[0], 1.0 / sx);
-  i.Columns[1] = HMM_MulV3F(i.Columns[1], 1.0 / sy);
-  i.Columns[2] = HMM_MulV3F(i.Columns[2], 1.0 / sz);
-  quat r = mat3_to_quat(i);
-
-  result.position = translation;
-  result.scale = scale;
-  result.rotation = r;
-
-  return result;
-}
-#endif
-
-#if 1
 mat4 transform_to_mat4(Transform t) {
 #ifdef TRANSFORM_USE_MATRICES
   return t.m;
 #else
   mat4 out;
   out = HMM_Scale(t.scale);
-  // NOTE THIS IS FOR LEFT HANDED COORDINATE SYSTEM
+#ifdef LEFT_HANDED
   out = HMM_MulM4(HMM_QToM4(t.rotation), out);
+  // out = HMM_MulM4(quat_to_mat4(t.rotation), out);
+#else
+  out = HMM_MulM4(quat_to_mat4(t.rotation), out);
+#endif
   out = HMM_MulM4(HMM_Translate(t.position), out);
   return out;
 #endif
 }
-#else
-// original
-mat4 transform_to_mat4(Transform t) {
-  // First, extract the rotation basis of the transform
-  //   vec3 x = t.rotation * vec3(1, 0, 0);
-  //   vec3 y = t.rotation * vec3(0, 1, 0);
-  //   vec3 z = t.rotation * vec3(0, 0, 1);
-  vec3 x = quat_mul_v3(t.rotation, HMM_V3(1.0, 0.0, 0.0));
-  vec3 y = quat_mul_v3(t.rotation, HMM_V3(0.0, 1.0, 0.0));
-  vec3 z = quat_mul_v3(t.rotation, HMM_V3(0.0, 0.0, 1.0));
-
-  // Next, scale the basis vectors
-  x = HMM_MulV3F(x, t.scale.X);
-  y = HMM_MulV3F(y, t.scale.Y);
-  z = HMM_MulV3F(z, t.scale.Z);
-
-  // Extract the position of the transform
-  vec3 p = t.position;
-
-  // Create matrix
-  //   return (HMM_Mat4){.Columns = {{x.X, y.X, z.X, p.X},
-  //                                 {x.Y, y.Y, z.Y, p.Y},
-  //                                 {x.Z, y.Z, z.Z, p.Z},
-  //                                 {0, 0, 0, 1}}};
-  return mat4_new(x.X, x.Y, x.Z, 0, // X basis (& Scale)
-                  y.X, y.Y, y.Z, 0, // Y basis (& scale)
-                  z.X, z.Y, z.Z, 0, // Z basis (& scale)
-                  p.X, p.Y, p.Z, 1  // Position
-  );
-}
-#endif
 
 // Some important things to note. Each joint has a transform and a parent.
 //
@@ -1378,11 +1443,11 @@ void frame(void) {
 
   fs_params_t fs_params;
   fs_params.light[0] = 0.0;
-  fs_params.light[1] = 1.0;
+  fs_params.light[1] = 0.0;
 #ifdef LEFT_HANDED
-  fs_params.light[2] = 0.0;
+  fs_params.light[2] = 1.0;
 #else
-  fs_params.light[2] = 0.0;
+  fs_params.light[2] = -1.0;
 #endif
 
 #ifdef LEFT_HANDED

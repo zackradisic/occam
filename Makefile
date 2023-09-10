@@ -37,6 +37,9 @@ src/shaders/bonemesh_cpu.glsl.h: src/shaders/bonemesh_cpu.glsl
 bonemesh: src/shaders/bonemesh.glsl.h
 bonemesh_cpu: src/shaders/bonemesh_cpu.glsl.h
 
+run: clean main
+	./out/main
+
 # $(OUT_DIR)/sokol.o: src/sokol.h 
 # 	$(CC) $(LD_FLAGS) -ObjC -o $@ -c $<
 
