@@ -147,13 +147,18 @@ vec3 mat4_mul_p(mat4 m, vec3 v) {
                 M4V4D(m, 2, v.X, v.Y, v.Z, 1.0f));
 }
 
-static inline vec3 vec3_convert_handedness(vec3 in) {
+const HMM_Mat4 MAT4_CONVERT_HAND = {.Elements = {{1.0f, 0.0f, 0.0f, 0.0f},
+                                                 {0.0f, 1.0f, 0.0f, 0.0f},
+                                                 {0.0f, 0.0f, -1.0f, 0.0f},
+                                                 {0.0f, 0.0f, 0.0f, 1.0f}}};
+
+static inline vec3 vec3_convert_handedness(bool is_point, vec3 in) {
 #ifdef LEFT_HANDED
-  // return HMM_V3(in.X, in.Y, -in.Z);
-  // return HMM_V3(in.X, in.Y, in.Z);
-  // return HMM_V3(in.X, in.Z, in.Y);
-  return HMM_V3(in.X, in.Y, -in.Z);
-  // return in;
+  if (is_point)
+    return mat4_mul_p(MAT4_CONVERT_HAND, in);
+  return mat4_mul_v3(MAT4_CONVERT_HAND, in);
+
+  return in;
 #else
   return in;
 #endif
@@ -301,35 +306,31 @@ typedef struct {
 } Transform;
 
 Transform cgltf_get_local_transform(cgltf_node *n);
-void transform_convert_handedness(Transform *t);
-
-const mat4 MAT4_CONVERT_HAND = {.Elements = {
-                                    {1, 0, 0},
-                                    {0, 0, 1},
-                                    {0, 1, 0},
-                                }};
-
+// To convert:
+// you could also look at the matrix math, in a right handed coordinate system
+// you get `posWorld = matToWorld*matAnim*vertModel` but instead you have a
+// `matToWorld` in left handed and want the result in left handed. So you need a
+// `posWorld = matToWorld*matToLeft*matAnim*vertModel` but you want that
+// `matToLeft` to be integrated in both the `matAnim` and `vertModel` to that
+// end you can do `matAnimLeftHanded = matToLeft*matAnim*matToRight` and have
+// `vertModelLeftHanded = matToLeft*vertModel` and because `matToRight*matToLeft
+// == matIdentity` that will cancel out and make `posWorld =
+// matToWorld*matAnimeftHanded*vertModelLeftHanded` end up as `posWorld =
+// matToWorld*matToLeft*matAnim*vertModel` from:
+// https://discord.com/channels/239737791225790464/1084530676059082832/1084537739405434892
+// `matToLeft` and `matToRight` are MAT4_CONVERT_HAND
 // This function should be called whenever we create a transform from glTF
 // values, this is because glTF uses a right handed coordinate system.
+void transform_convert_handedness(Transform *t);
+
 void transform_convert_handedness(Transform *t) {
 #ifdef LEFT_HANDED
 #ifdef TRANSFORM_USE_MATRICES
-  // Negate the third row
-  t->m.Elements[2][0] = -t->m.Elements[2][0];
-  t->m.Elements[2][1] = -t->m.Elements[2][1];
-  t->m.Elements[2][2] = -t->m.Elements[2][2];
-  t->m.Elements[2][3] = -t->m.Elements[2][3];
-
-  // Negate the third column
-  t->m.Elements[0][2] = -t->m.Elements[0][2];
-  t->m.Elements[1][2] = -t->m.Elements[1][2];
-  t->m.Elements[2][2] = -t->m.Elements[2][2];
-  t->m.Elements[3][2] = -t->m.Elements[3][2];
-  return;
+  t->m = HMM_MulM4(MAT4_CONVERT_HAND, HMM_MulM4(t->m, MAT4_CONVERT_HAND));
 #else
   // Converting from right-handed to left-handed coordinate system
-  t->position = vec3_convert_handedness(t->position);
-  t->scale = vec3_convert_handedness(t->scale);
+  t->position = vec3_convert_handedness(true, t->position);
+  t->scale = vec3_convert_handedness(false, t->scale);
   // t->rotation = (quat){.W = t->rotation.W,
   //                      .X = -t->rotation.X,
   //                      .Y = -t->rotation.Y,
@@ -941,6 +942,18 @@ void bonemesh_init_attributes(BoneMesh *mesh, cgltf_attribute *attribute) {
   mesh->vertices_len = len;
 }
 
+// Assume normal is your input normal, and matToLeft is the same as before.
+HMM_Vec3 TransformNormal(HMM_Vec3 normal, HMM_Mat4 mat) {
+  HMM_Vec3 result;
+  result.X = normal.X * mat.Elements[0][0] + normal.Y * mat.Elements[1][0] +
+             normal.Z * mat.Elements[2][0];
+  result.Y = normal.X * mat.Elements[0][1] + normal.Y * mat.Elements[1][1] +
+             normal.Z * mat.Elements[2][1];
+  result.Z = normal.X * mat.Elements[0][2] + normal.Y * mat.Elements[1][2] +
+             normal.Z * mat.Elements[2][2];
+  return result;
+}
+
 void bonemesh_from_attribute(BoneMesh *out_mesh, cgltf_attribute *attribute,
                              cgltf_skin *skin, cgltf_node *nodes,
                              u32 node_count) {
@@ -965,24 +978,14 @@ void bonemesh_from_attribute(BoneMesh *out_mesh, cgltf_attribute *attribute,
     int index = i * component_count;
     switch (attrib_type) {
     case cgltf_attribute_type_position:
-      // out_mesh->positions[i] = HMM_V3(values.ptr[index], values.ptr[index +
-      // 1],
-      //                                 values.ptr[index + 2]);
-      out_mesh->positions[i] = vec3_convert_handedness(HMM_V3(
-          values.ptr[index], values.ptr[index + 1], values.ptr[index + 2]));
+      out_mesh->positions[i] = vec3_convert_handedness(
+          true, HMM_V3(values.ptr[index], values.ptr[index + 1],
+                       values.ptr[index + 2]));
       break;
     case cgltf_attribute_type_normal:
-      // out_mesh->norms[i] = vec3_convert_handedness(HMM_V3(
-      //     values.ptr[index], values.ptr[index + 1], values.ptr[index + 2]));
-      out_mesh->norms[i] = HMM_V3(values.ptr[index], values.ptr[index + 1],
-                                  values.ptr[index + 2]);
-      // out_mesh->norms[i] = HMM_V3(values.ptr[index], -values.ptr[index + 1],
-      //                             values.ptr[index + 2]);
-      // if (HMM_LenSqrV3(out_mesh->norms[i]) < 0.000001f) {
-      //   out_mesh->norms[i] = HMM_V3(0, 1, 0);
-      // } else {
-      //   out_mesh->norms[i] = HMM_NormV3(out_mesh->norms[i]);
-      // }
+      out_mesh->norms[i] = vec3_convert_handedness(
+          false, HMM_V3(values.ptr[index], values.ptr[index + 1],
+                        values.ptr[index + 2]));
       break;
     case cgltf_attribute_type_texcoord:
       out_mesh->texcoords[i] = HMM_V2(values.ptr[index], values.ptr[index + 1]);
@@ -994,19 +997,7 @@ void bonemesh_from_attribute(BoneMesh *out_mesh, cgltf_attribute *attribute,
       break;
     case cgltf_attribute_type_joints: {
       // These indices are skin relative. This function has no
-      // information about the skin that is being parsed. Add +0.5f to
-      // round, since we can't read ints
-      // ivec4 joints = {.v = {(int)(values.ptr[index + 0] + 0.5f),
-      //                       (int)(values.ptr[index + 1] + 0.5f),
-      //                       (int)(values.ptr[index + 2] + 0.5f),
-      //                       (int)(values.ptr[index + 3] + 0.5f)}};
-      // u8vec4 joints = {.v = {(int)(values.ptr[index + 0] + 0.5f),
-      //                        (int)(values.ptr[index + 1] + 0.5f),
-      //                        (int)(values.ptr[index + 2] + 0.5f),
-      //                        (int)(values.ptr[index + 3] + 0.5f)}};
-      // printf("VALUE: %f %f %f %f\n", values.ptr[index + 0],
-      //        values.ptr[index + 1], values.ptr[index + 2],
-      //        values.ptr[index + 3]);
+      // information about the skin that is being parsed.
       u8vec4 joints = {
           .v = {(int)(values.ptr[index + 0]), (int)(values.ptr[index + 1]),
                 (int)(values.ptr[index + 2]), (int)(values.ptr[index + 3])}};
@@ -1387,11 +1378,11 @@ void frame(void) {
 
   fs_params_t fs_params;
   fs_params.light[0] = 0.0;
-  fs_params.light[1] = 0.0;
+  fs_params.light[1] = 1.0;
 #ifdef LEFT_HANDED
-  fs_params.light[2] = -1.0;
+  fs_params.light[2] = 0.0;
 #else
-  fs_params.light[2] = 1.0;
+  fs_params.light[2] = 0.0;
 #endif
 
 #ifdef LEFT_HANDED
@@ -1403,7 +1394,6 @@ void frame(void) {
 #endif
 
   const float t = (float)(sapp_frame_duration() * 60.0);
-  // const float t = (float)(sapp_frame_duration());
 
   // HMM_Mat4 proj = HMM_Perspective(90.0, w / h, 0.1f, 100.0f);
   // HMM_Mat4 view = HMM_LookAt((HMM_Vec3){.X = 0.0f, .Y = 0.0f, .Z =
@@ -1437,11 +1427,6 @@ void frame(void) {
   sg_apply_uniforms(SG_SHADERSTAGE_VS, SLOT_vs_params,
                     &SG_RANGE(state.vs_params));
   sg_apply_uniforms(SG_SHADERSTAGE_FS, SLOT_fs_params, &SG_RANGE(fs_params));
-  // SG_PRIMITIVETYPE_TRIANGLES
-  // sg_draw(0, state.bm.indices.len, state.bm.vertices_len / 3);
-  // sg_draw(0, state.bm.vertices_len * 3, 1);
-  // sg_draw(0, state.bm.indices.len, 1);
-  // sg_draw(0, 3, state.bm.vertices_len / 3);
   sg_draw(0, state.bm.indices.len, 1);
   sg_end_pass();
   sg_commit();
@@ -1455,8 +1440,10 @@ sapp_desc sokol_main(int argc, char *argv[]) {
 
 #ifdef SOKOL_METAL
   printf("Using Metal\n");
+  const char *name = "occam (Metal)";
 #else
   printf("Using OpenGL\n");
+  const char *name = "occam (OpenGL)";
 #endif
 
 #ifdef CPU_SKIN
@@ -1473,7 +1460,7 @@ sapp_desc sokol_main(int argc, char *argv[]) {
       .width = 800,
       .height = 600,
       .sample_count = 4,
-      .window_title = "Cube (sokol-app)",
+      .window_title = name,
       .icon.sokol_default = true,
       .logger.func = slog_func,
   };

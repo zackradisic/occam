@@ -26,7 +26,8 @@ void main() {
     skin += (pose[int(joints.w)] * invBindPose[int(joints.w)]) * weights.w;
 
     gl_Position = projection * view * model * skin * vec4(position, 1.0);
-    norm = vec3(model * skin * vec4(normal, 0.0f));
+    // invert the normal because for some reason it's broken
+    norm = vec3(model * skin * vec4(-normal, 0.0f));
 
     // gl_Position = projection * view * model * vec4(position, 1.0);
     // norm = vec3(model * vec4(normal, 0.0f));
