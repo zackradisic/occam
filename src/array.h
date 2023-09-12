@@ -18,6 +18,26 @@ typedef struct {
     usize cap;                                                                 \
   }
 
+typedef struct {
+  u8 *maybe_null ptr;
+  usize len;
+} slice_t;
+
+#define slice_type(T)                                                          \
+  struct {                                                                     \
+    T *maybe_null ptr;                                                         \
+    usize len;                                                                 \
+  }
+
+#define slice_empty(T) ((T){.ptr = NULL, .len = 0})
+
+slice_t _array_as_slice(array_t *arr) {
+  return (slice_t){
+      .ptr = arr->ptr,
+      .len = arr->len,
+  };
+}
+
 void _array_init(array_t *arr, usize cap, usize elem_size) {
   usize actual_cap = cap < 4 ? 4 : cap;
   u8 *ptr = (u8 *)malloc(elem_size * actual_cap);

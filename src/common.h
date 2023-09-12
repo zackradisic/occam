@@ -44,6 +44,8 @@ int float_eq(float a, float b);
 /*   return x && (!(x & (x - 1))); */
 /* } */
 
+#define components(X, T) sizeof(X) / sizeof(T)
+
 // From:
 // https://github.com/rsms/compis/blob/3946ed5c1da01addf5b07faa872cc6463df2521d/src/colib.h#L182
 #ifndef countof

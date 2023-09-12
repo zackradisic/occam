@@ -19,6 +19,7 @@
 #include "stdio.h"
 #include "arena.h"
 #include <sokol/sokol_glue.h>
+#include <sokol/sokol_time.h>
 #define CGLTF_IMPLEMENTATION
 #include <cgltf.h>
 #include "array.h"
@@ -162,6 +163,9 @@ static inline vec3 vec3_convert_handedness(bool is_point, vec3 in) {
 #endif
 }
 
+static inline vec3 vec3_new(float a, float b, float c) {
+  return (vec3){a, b, c};
+}
 static inline vec3 vec3_default() { return (vec3){0, 0, 0}; }
 static inline vec4 vec4_default() { return (vec4){0, 0, 0, 0}; }
 
@@ -275,6 +279,10 @@ HMM_Vec3 quat_mul_v3(quat q, HMM_Vec3 v) {
 #define NO_HANDMADE_QUAT_IMPL
 #ifdef NO_HANDMADE_QUAT_IMPL
 quat quat_default() { return HMM_Q(0, 0, 0, 1); }
+
+float quat_dot(quat a, quat b) {
+  return a.X * b.X + a.Y * b.Y + a.Z * b.Z + a.W * b.W;
+}
 
 quat quat_mul_quat(quat Q1, quat Q2) {
   return quat_new(Q2.X * Q1.W + Q2.Y * Q1.Z - Q2.Z * Q1.Y + Q2.W * Q1.X,
@@ -647,6 +655,613 @@ mat4 transform_to_mat4(Transform t) {
 #endif
 }
 
+typedef enum {
+  INTERP_CONSTANT,
+  INTERP_LINEAR,
+  INTERP_CUBIC,
+} Interpolation;
+
+typedef enum {
+  FRAME_SCALAR,
+  FRAME_VEC3,
+  FRAME_QUAT,
+} FrameType;
+
+u8 frame_type_float_count(FrameType ft) {
+  switch (ft) {
+  case FRAME_SCALAR:
+    return components(float, float);
+  case FRAME_VEC3:
+    return components(vec3, float);
+  case FRAME_QUAT:
+    return components(quat, float);
+  }
+}
+
+static inline quat quat_mix(quat from, quat to, float t) {
+  return HMM_AddQ(HMM_MulQF(from, 1.0f - t), HMM_MulQF(to, t));
+}
+
+static inline float interpolate_scalar(float a, float b, float t) {
+  return a + (b - a) * t;
+}
+
+static inline vec3 interpolate_vec3(vec3 a, vec3 b, float t) {
+  return vec3_new(a.X + (b.X - a.X) * t, a.Y + (b.Y - a.Y) * t,
+                  a.Z + (b.Z - a.Z) * t);
+}
+
+static inline quat interpolate_quat(quat a, quat b, float t) {
+  quat result = quat_mix(a, b, t);
+  if (quat_dot(a, b) < 0) {
+    result = quat_mix(a, HMM_MulQF(b, -1), t);
+  }
+  return HMM_NormQ(result);
+}
+
+static inline float hermite_scalar(float t, float p1, float s1, float _p2,
+                                   float s2) {
+  float tt = t * t;
+  float ttt = tt * t;
+
+  float p2 = _p2;
+
+  float h1 = 2.0f * ttt - 3.0f * tt + 1.0f;
+  float h2 = -2.0f * ttt + 3.0f * tt;
+  float h3 = ttt - 2.0f * tt + t;
+  float h4 = ttt - tt;
+
+  float result = p1 * h1 + p2 * h2 + s1 * h3 + s2 * h4;
+  return result;
+}
+
+static inline vec3 hermite_vec3(float t, vec3 p1, vec3 s1, vec3 _p2, vec3 s2) {
+  float tt = t * t;
+  float ttt = tt * t;
+
+  vec3 p2 = _p2;
+
+  float h1 = 2.0f * ttt - 3.0f * tt + 1.0f;
+  float h2 = -2.0f * ttt + 3.0f * tt;
+  float h3 = ttt - 2.0f * tt + t;
+  float h4 = ttt - tt;
+
+  vec3 result = HMM_AddV3(HMM_AddV3(HMM_MulV3F(p1, h1), HMM_MulV3F(p2, h2)),
+                          HMM_AddV3(HMM_MulV3F(s1, h3), HMM_MulV3F(s2, h4)));
+
+  return result;
+}
+
+static inline void quat_neighborhood(const quat *a, quat *b) {
+  if (quat_dot(*a, *b) < 0) {
+    *b = quat_inverse(*b);
+  }
+}
+
+static inline quat hermite_quat(float t, quat p1, quat s1, quat _p2, quat s2) {
+  float tt = t * t;
+  float ttt = tt * t;
+
+  quat p2 = _p2;
+
+  float h1 = 2.0f * ttt - 3.0f * tt + 1.0f;
+  float h2 = -2.0f * ttt + 3.0f * tt;
+  float h3 = ttt - 2.0f * tt + t;
+  float h4 = ttt - tt;
+
+  quat result = HMM_AddQ(HMM_AddQ(HMM_MulQF(p1, h1), HMM_MulQF(p2, h2)),
+                         HMM_AddQ(HMM_MulQF(s1, h3), HMM_MulQF(s2, h4)));
+
+  return result;
+}
+
+#define frame_type(T)                                                          \
+  struct {                                                                     \
+    FrameHeader header;                                                        \
+    T value;                                                                   \
+    T in;                                                                      \
+    T out;                                                                     \
+  }
+
+typedef struct {
+  float time;
+} FrameHeader;
+
+typedef frame_type(float) scalar_frame_t;
+typedef frame_type(vec3) vec3_frame_t;
+typedef frame_type(quat) quat_frame_t;
+#define frame_value(T, frame_ptr) ((T *)(frame_ptr))->value
+#define frame_in(T, frame_ptr) ((T *)(frame_ptr))->in
+#define frame_out(T, frame_ptr) ((T *)(frame_ptr))->out
+#define frame_time(frame_ptr) ((FrameHeader *)(frame_ptr))->time
+#define frame_set_time(frame_ptr, val)                                         \
+  ((FrameHeader *)(frame_ptr))->time = (val)
+
+typedef struct {
+  slice_t frames;
+  Interpolation interpolation;
+} track_t;
+
+#define cast_ptr(T, ptr) ((T *)(ptr))
+
+track_t track_new() {
+  return (track_t){
+      .frames = slice_empty(slice_t),
+      .interpolation = INTERP_CONSTANT,
+  };
+}
+float track_start_time(const track_t *trk);
+float track_end_time(const track_t *trk);
+int track_frame_index(const track_t *trk, float time, bool looping,
+                      FrameType ft);
+void track_sample(const track_t *trk, float time, bool looping, void *out,
+                  FrameType ft);
+void track_sample_constant(const track_t *trk, float time, bool looping,
+                           void *out, FrameType ft);
+void track_sample_linear(const track_t *trk, float time, bool looping,
+                         void *out, FrameType ft);
+void track_sample_cubic(const track_t *trk, float time, bool looping, void *out,
+                        FrameType ft);
+void track_default_sample(const track_t *trk, void *out, FrameType ft);
+float track_time_at_index(const track_t *trk, int idx, FrameType ft);
+void track_value_at_index(const track_t *trk, void *out, int idx, FrameType ft);
+float track_adjust_time_to_fit(const track_t *trk, float time, bool looping,
+                               FrameType ft);
+
+float track_start_time(const track_t *trk) {
+  return frame_time(&trk->frames.ptr[0]);
+}
+float track_end_time(const track_t *trk) {
+  return frame_time(&trk->frames.ptr[trk->frames.len - 1]);
+}
+
+float track_adjust_time_to_fit(const track_t *trk, float time, bool looping,
+                               FrameType ft) {
+  usize size = trk->frames.len;
+  if (size <= 1)
+    return 0.0;
+
+  float start_time = track_time_at_index(trk, 0, ft);
+  float end_time = track_time_at_index(trk, size - 1, ft);
+  float duration = end_time - start_time;
+  if (duration <= 0.0f)
+    return 0.0f;
+
+  if (looping) {
+    time = fmodf(time - start_time, end_time - start_time);
+    if (time < 0.0f) {
+      time += end_time - start_time;
+    }
+    time = time + start_time;
+  } else {
+    if (time <= track_time_at_index(trk, 0, ft)) {
+      time = start_time;
+    }
+    if (time >= track_time_at_index(trk, size - 1, ft)) {
+      time = end_time;
+    }
+  }
+
+  return time;
+}
+
+#define switch_ft(ft, scalar_branch, vec3_branch, quat_branch)                 \
+  switch (ft) {                                                                \
+  case FRAME_SCALAR: {                                                         \
+    scalar_branch;                                                             \
+    break;                                                                     \
+  }                                                                            \
+  case FRAME_VEC3: {                                                           \
+    vec3_branch;                                                               \
+    break;                                                                     \
+  }                                                                            \
+  case FRAME_QUAT: {                                                           \
+    quat_branch;                                                               \
+    break;                                                                     \
+  }                                                                            \
+  }
+
+#define switch_ft_set_out(ft, out, scalar_branch, vec3_branch, quat_branch)    \
+  switch (ft) {                                                                \
+  case FRAME_SCALAR: {                                                         \
+    *cast_ptr(float, out) = scalar_branch;                                     \
+    break;                                                                     \
+  }                                                                            \
+  case FRAME_VEC3: {                                                           \
+    *cast_ptr(vec3, out) = vec3_branch;                                        \
+    break;                                                                     \
+  }                                                                            \
+  case FRAME_QUAT: {                                                           \
+    *cast_ptr(quat, out) = quat_branch;                                        \
+    break;                                                                     \
+  }                                                                            \
+  }
+
+#define switch_ft_set_out_block(ft, out, casted_out, scalar_branch,            \
+                                vec3_branch, quat_branch)                      \
+  switch (ft) {                                                                \
+  case FRAME_SCALAR: {                                                         \
+    float *casted_out = cast_ptr(float, out);                                  \
+    scalar_branch;                                                             \
+    break;                                                                     \
+  }                                                                            \
+  case FRAME_VEC3: {                                                           \
+    vec3 *casted_out = cast_ptr(vec3, out);                                    \
+    vec3_branch;                                                               \
+    break;                                                                     \
+  }                                                                            \
+  case FRAME_QUAT: {                                                           \
+    quat *casted_out = cast_ptr(quat, out);                                    \
+    quat_branch;                                                               \
+    break;                                                                     \
+  }                                                                            \
+  }
+
+inline float track_time_at_index(const track_t *trk, int idx, FrameType ft) {
+  switch_ft(
+      ft, { return frame_time(&trk->frames.ptr[idx]); },
+      { return frame_time(&trk->frames.ptr[idx]); },
+      { return frame_time(&trk->frames.ptr[idx]); })
+}
+
+inline void track_value_at_index(const track_t *trk, void *out, int idx,
+                                 FrameType ft) {
+  switch_ft_set_out(ft, out, frame_value(scalar_frame_t, &trk->frames.ptr[idx]),
+                    frame_value(vec3_frame_t, &trk->frames.ptr[idx]),
+                    frame_value(quat_frame_t, &trk->frames.ptr[idx]));
+}
+
+inline void track_default_sample(const track_t *trk, void *out, FrameType ft) {
+  switch_ft_set_out(ft, out, 0.0, vec3_default(), quat_default());
+}
+
+inline void track_sample(const track_t *trk, float time, bool looping,
+                         void *out, FrameType ft) {
+  switch (trk->interpolation) {
+  case INTERP_CONSTANT: {
+    track_sample_constant(trk, time, looping, out, ft);
+    break;
+  }
+  case INTERP_LINEAR: {
+    track_sample_linear(trk, time, looping, out, ft);
+    break;
+  }
+  case INTERP_CUBIC: {
+    track_sample_cubic(trk, time, looping, out, ft);
+    break;
+  }
+  }
+}
+
+void track_sample_constant(const track_t *trk, float time, bool looping,
+                           void *out, FrameType ft) {
+  int frame = track_frame_index(trk, time, looping, ft);
+  if (frame < 0 || frame >= (int)trk->frames.len) {
+    track_default_sample(trk, out, ft);
+    return;
+  }
+
+  void *first = &trk->frames.ptr[0];
+  switch_ft_set_out(ft, out, frame_value(scalar_frame_t, &first),
+                    frame_value(vec3_frame_t, &first),
+                    frame_value(quat_frame_t, &first));
+}
+void track_sample_linear(const track_t *trk, float time, bool looping,
+                         void *out, FrameType ft) {
+  int frame = track_frame_index(trk, time, looping, ft);
+  if (frame < 0 || frame >= (int)trk->frames.len) {
+    track_default_sample(trk, out, ft);
+    return;
+  }
+  int next_frame = frame + 1;
+
+  float track_time = track_adjust_time_to_fit(trk, time, looping, ft);
+  float frame_delta = track_time_at_index(trk, next_frame, ft) -
+                      track_time_at_index(trk, frame, ft);
+  if (frame_delta <= 0.0f)
+    return track_default_sample(trk, out, ft);
+
+  float t = (track_time - track_time_at_index(trk, frame, ft)) / frame_delta;
+
+  switch_ft_set_out_block(ft, out, x, ({
+                            float start, end;
+                            track_value_at_index(trk, &start, frame, ft);
+                            track_value_at_index(trk, &end, next_frame, ft);
+                            *x = interpolate_scalar(start, end, t);
+                          }),
+                          ({
+                            vec3 start, end;
+                            track_value_at_index(trk, &start, frame, ft);
+                            track_value_at_index(trk, &end, next_frame, ft);
+                            *x = interpolate_vec3(start, end, t);
+                          }),
+                          ({
+                            quat start, end;
+                            track_value_at_index(trk, &start, frame, ft);
+                            track_value_at_index(trk, &end, next_frame, ft);
+                            *x = interpolate_quat(start, end, t);
+                          }));
+}
+void track_sample_cubic(const track_t *trk, float time, bool looping, void *out,
+                        FrameType ft) {
+  int frame = track_frame_index(trk, time, looping, ft);
+  if (frame < 0 || frame >= (int)trk->frames.len) {
+    track_default_sample(trk, out, ft);
+    return;
+  }
+  int next_frame = frame + 1;
+
+  float track_time = track_adjust_time_to_fit(trk, time, looping, ft);
+  float frame_delta = track_time_at_index(trk, next_frame, ft) -
+                      track_time_at_index(trk, frame, ft);
+  if (frame_delta <= 0.0f)
+    return track_default_sample(trk, out, ft);
+
+  float t = (track_time - track_time_at_index(trk, frame, ft)) / frame_delta;
+  switch_ft_set_out_block(
+      ft, out, x,
+      {
+        float point1 = frame_value(scalar_frame_t, &trk->frames.ptr[frame]);
+        float slope1 = frame_out(scalar_frame_t, &trk->frames.ptr[frame]);
+        float point2 =
+            frame_value(scalar_frame_t, &trk->frames.ptr[next_frame]);
+        float slope2 = frame_out(scalar_frame_t, &trk->frames.ptr[next_frame]);
+        slope1 = slope1 * frame_delta;
+        slope2 = slope2 * frame_delta;
+        *x = hermite_scalar(t, point1, slope1, point2, slope2);
+      },
+      {
+        vec3 point1 = frame_value(vec3_frame_t, &trk->frames.ptr[frame]);
+        vec3 slope1 = frame_out(vec3_frame_t, &trk->frames.ptr[frame]);
+        vec3 point2 = frame_value(vec3_frame_t, &trk->frames.ptr[next_frame]);
+        vec3 slope2 = frame_out(vec3_frame_t, &trk->frames.ptr[next_frame]);
+        slope1 = HMM_MulV3F(slope1, frame_delta);
+        slope2 = HMM_MulV3F(slope2, frame_delta);
+        *x = hermite_vec3(t, point1, slope1, point2, slope2);
+      },
+      {
+        quat point1 = frame_value(quat_frame_t, &trk->frames.ptr[frame]);
+        quat slope1 = frame_out(quat_frame_t, &trk->frames.ptr[frame]);
+        quat point2 = frame_value(quat_frame_t, &trk->frames.ptr[frame]);
+        quat slope2 = frame_out(quat_frame_t, &trk->frames.ptr[frame]);
+        slope1 = HMM_MulQF(slope1, frame_delta);
+        slope2 = HMM_MulQF(slope2, frame_delta);
+        *x = hermite_quat(t, point1, slope1, point2, slope2);
+      });
+}
+
+int track_frame_index(const track_t *trk, float time, bool looping,
+                      FrameType ft) {
+  usize size = trk->frames.len;
+  if (size <= 1)
+    return -1;
+
+  if (looping) {
+    float start_time = track_time_at_index(trk, 0, ft);
+    float end_time = track_time_at_index(trk, size - 1, ft);
+    float duration = end_time - start_time;
+
+    time = fmodf(time - start_time, end_time - start_time);
+    if (time < 0.0f) {
+      time += end_time - start_time;
+    }
+    time = time + start_time;
+  } else {
+    if (time <= track_time_at_index(trk, 0, ft)) {
+      return 0;
+    }
+    if (time >= track_time_at_index(trk, size - 1, ft)) {
+      return (int)size - 2;
+    }
+  }
+
+  for (int i = (int)size - 1; i >= 0; --i) {
+    if (time >= track_time_at_index(trk, i, ft)) {
+      return i;
+    }
+  }
+  // Invalid code, we should not reach here!
+  return -1;
+}
+
+void track_from_cgltf_channel(track_t *result,
+                              const cgltf_animation_channel *channel,
+                              FrameType ft) {
+  cgltf_animation_sampler *sampler = channel->sampler;
+
+  Interpolation interp = INTERP_CONSTANT;
+  if (sampler->interpolation == cgltf_interpolation_type_linear) {
+    interp = INTERP_LINEAR;
+  } else if (sampler->interpolation == cgltf_interpolation_type_cubic_spline) {
+    interp = INTERP_CUBIC;
+  }
+  bool is_sampler_cubic = interp == INTERP_CUBIC;
+  result->interpolation = interp;
+
+  floatarray_t timeline_floats = array_empty(floatarray_t);
+  floatarray_t value_floats = array_empty(floatarray_t);
+
+  u8 component_count = frame_type_float_count(ft);
+  cgltf_get_scalar_values(&timeline_floats, component_count, sampler->input);
+  cgltf_get_scalar_values(&value_floats, component_count, sampler->output);
+
+  u32 num_frames = (u32)sampler->input->count;
+  u32 num_values_per_frame = value_floats.len / timeline_floats.len;
+  usize frame_size = 0;
+  switch_ft(
+      ft,
+      //
+      { frame_size = sizeof(scalar_frame_t); },
+      { frame_size = sizeof(vec3_frame_t); },
+      { frame_size = sizeof(quat_frame_t); });
+  result->frames.ptr = (u8 *)malloc(num_frames * frame_size);
+  result->frames.len = num_frames;
+
+  for (u32 i = 0; i < num_frames; i++) {
+    int base_index = i * num_values_per_frame;
+    float *value_ptr = &value_floats.ptr[base_index];
+    u8 *frame = &result->frames.ptr[i];
+
+    frame_set_time(frame, timeline_floats.ptr[i]);
+
+    float _zeroes[component_count];
+    ZERO(_zeroes);
+    float *zeroes = (float *)(&_zeroes);
+
+    switch_ft(
+        ft,
+        {
+          memcpy(&cast_ptr(scalar_frame_t, frame)->in,
+                 is_sampler_cubic ? value_ptr : zeroes,
+                 sizeof(float) * component_count);
+        },
+        {
+          memcpy(&cast_ptr(vec3_frame_t, frame)->in,
+                 is_sampler_cubic ? value_ptr : zeroes,
+                 sizeof(float) * component_count);
+        },
+        {
+          memcpy(&cast_ptr(quat_frame_t, frame)->in,
+                 is_sampler_cubic ? value_ptr : zeroes,
+                 sizeof(float) * component_count);
+        });
+
+    value_ptr += component_count;
+
+    switch_ft(
+        ft,
+        {
+          memcpy(&cast_ptr(scalar_frame_t, frame)->value, value_ptr,
+                 sizeof(float) * component_count);
+        },
+        {
+          memcpy(&cast_ptr(vec3_frame_t, frame)->value, value_ptr,
+                 sizeof(float) * component_count);
+        },
+        {
+          memcpy(&cast_ptr(quat_frame_t, frame)->value, value_ptr,
+                 sizeof(float) * component_count);
+        });
+
+    value_ptr += component_count;
+
+    switch_ft(
+        ft,
+        {
+          memcpy(&cast_ptr(scalar_frame_t, frame)->out,
+                 is_sampler_cubic ? value_ptr : zeroes,
+                 sizeof(float) * component_count);
+        },
+        {
+          memcpy(&cast_ptr(vec3_frame_t, frame)->out,
+                 is_sampler_cubic ? value_ptr : zeroes,
+                 sizeof(float) * component_count);
+        },
+        {
+          memcpy(&cast_ptr(quat_frame_t, frame)->out,
+                 is_sampler_cubic ? value_ptr : zeroes,
+                 sizeof(float) * component_count);
+        });
+  }
+
+  array_free(&timeline_floats);
+  array_free(&value_floats);
+}
+
+typedef struct {
+  u32 id;
+  // vec3
+  track_t position;
+  // quat
+  track_t rotation;
+  // vec3
+  track_t scale;
+} TransformTrack;
+
+bool transform_track_is_valid(const TransformTrack *trk) {
+  return trk->position.frames.len > 1 || trk->rotation.frames.len > 1 ||
+         trk->scale.frames.len > 1;
+}
+
+float transform_track_start_time(const TransformTrack *trk) {
+  float result = 0.0;
+  bool is_set = false;
+
+  if (trk->position.frames.len > 1) {
+    result = track_start_time(&trk->rotation);
+    is_set = true;
+  }
+
+  if (trk->rotation.frames.len > 1) {
+    float start = track_start_time(&trk->rotation);
+    if (start < result || !is_set) {
+      is_set = true;
+      result = start;
+    }
+  }
+
+  if (trk->scale.frames.len > 1) {
+    float start = track_start_time(&trk->scale);
+    if (start < result || !is_set) {
+      is_set = true;
+      result = start;
+    }
+  }
+
+  return result;
+}
+
+float transform_track_end_time(const TransformTrack *trk) {
+  float result = 0.0;
+  bool is_set = false;
+
+  if (trk->position.frames.len > 1) {
+    result = track_end_time(&trk->rotation);
+    is_set = true;
+  }
+
+  if (trk->rotation.frames.len > 1) {
+    float start = track_end_time(&trk->rotation);
+    if (start > result || !is_set) {
+      is_set = true;
+      result = start;
+    }
+  }
+
+  if (trk->scale.frames.len > 1) {
+    float start = track_end_time(&trk->scale);
+    if (start > result || !is_set) {
+      is_set = true;
+      result = start;
+    }
+  }
+
+  return result;
+}
+
+TransformTrack transform_track_new(u32 id) {
+  return (TransformTrack){.id = id,
+                          .position = track_new(),
+                          .rotation = track_new(),
+                          .scale = track_new()};
+}
+
+Transform transform_track_sample(const TransformTrack *trk,
+                                 const Transform *ref, float time,
+                                 bool looping) {
+  Transform result = *ref;
+  if (trk->position.frames.len > 1) {
+    track_sample(&trk->position, time, looping, &result.position, FRAME_VEC3);
+  }
+  if (trk->rotation.frames.len > 1) {
+    track_sample(&trk->rotation, time, looping, &result.rotation, FRAME_QUAT);
+  }
+  if (trk->scale.frames.len > 1) {
+    track_sample(&trk->scale, time, looping, &result.scale, FRAME_VEC3);
+  }
+  return result;
+}
+
 // Some important things to note. Each joint has a transform and a parent.
 //
 // A transform is a slimmer representation of a linear transformation, they
@@ -656,14 +1271,14 @@ mat4 transform_to_mat4(Transform t) {
 // transforms them into the joint's coordinate space.
 //
 // If you concatenate a joint's transform with its parent's and its parent's
-// parent's and so on, you will get a transformation that transforms a vertex
-// in the joint's coordinate space to a vertex in object/model space. In this
-// code we call that a joint's global transformation.
+// parent's and so on, you will get a transformation that transforms a
+// vertex in the joint's coordinate space to a vertex in object/model space.
+// In this code we call that a joint's global transformation.
 //
 // Another important transformation is the one carried by a joint's `inverse
 // bind matrix`. It basically does the opposite of a joint's global
-// transformation, it transforms vertices in object/model space to vertices in
-// the joint's coordinate space.
+// transformation, it transforms vertices in object/model space to vertices
+// in the joint's coordinate space.
 typedef struct Pose {
   Transform *joints;
   int *parents;
@@ -714,7 +1329,8 @@ void pose_set_local_transform(Pose *pose, u32 index, Transform transform) {
 }
 
 // Combine all the transforms up the parent chain until it reaches the root
-// bone. Remember, transform concatenation is carried out from right to left.
+// bone. Remember, transform concatenation is carried out from right to
+// left.
 Transform pose_get_global_transform(const Pose *pose, u32 index) {
   Transform result = pose->joints[index];
   for (int p = pose->parents[index]; p >= 0; p = pose->parents[p]) {
@@ -741,14 +1357,14 @@ Pose pose_load_rest_pose_from_cgltf(cgltf_data *data) {
 }
 
 // glTF stores inverse bind pose matrix for each joint. We want bind pose.To
-// do this we load the rest pose and invert each joint's matrix. Inverting an
-// inverse matrix returns the original matrix.
+// do this we load the rest pose and invert each joint's matrix. Inverting
+// an inverse matrix returns the original matrix.
 //
-// We default to the joint's world space / global matrix in the case that the
-// skin didn't specify an inverse bind matrix.
+// We default to the joint's world space / global matrix in the case that
+// the skin didn't specify an inverse bind matrix.
 //
-// Finally, we have to make sure that the inverse bind matrix of each joint is
-// local to the space of its parent.
+// Finally, we have to make sure that the inverse bind matrix of each joint
+// is local to the space of its parent.
 Pose pose_load_bind_pose_from_cgltf(cgltf_data *data, Pose rest_pose) {
   //   Pose rest_pose = pose_load_rest_pose_from_cgltf(data);
   u32 num_bones = rest_pose.len;
@@ -933,7 +1549,8 @@ void bonemesh_cpu_skin(BoneMesh *mesh, const Skeleton *sk, const Pose *p) {
     // mesh->skinned_positions[i] = vec4_truncate(
     //     HMM_MulM4V4(skin, vec3_to_vec4_point(mesh->positions[i])));
     // mesh->skinned_normals[i] =
-    //     vec4_truncate(HMM_MulM4V4(skin, vec3_to_vec4_vec(mesh->norms[i])));
+    //     vec4_truncate(HMM_MulM4V4(skin,
+    //     vec3_to_vec4_vec(mesh->norms[i])));
 
     mesh->skinned_positions[i] = mat4_mul_p(skin, mesh->positions[i]);
     mesh->skinned_normals[i] = mat4_mul_v3(skin, mesh->norms[i]);
@@ -1130,7 +1747,161 @@ bonemesh_array_t bonemesh_load_meshes(cgltf_data *data) {
   return result;
 }
 
-// Make sure to call `transform_convert_handedness()` if you want to use this
+typedef array_type(TransformTrack) transform_track_array_t;
+
+typedef struct {
+  transform_track_array_t tracks;
+  const char *name;
+  float start_time;
+  float end_time;
+  bool looping;
+} Clip;
+
+typedef array_type(Clip) clip_array_t;
+
+Clip clip_new();
+clip_array_t clip_load_animations_from_cgltf(cgltf_data *data);
+float clip_duration(const Clip *clip);
+void clip_recalculate_duration(Clip *clip);
+TransformTrack *clip_transform_track_at(Clip *clip, u32 joint_idx);
+float clip_sample(const Clip *clip, Pose *out_pose, float time);
+float clip_adjust_time_to_fit_range(const Clip *clip, float in_time);
+
+Clip clip_new() {
+  return (Clip){
+      .tracks = array_empty(transform_track_array_t),
+      .name = "<unknown>",
+      .start_time = 0.0,
+      .end_time = 0.0,
+      .looping = 0.0,
+  };
+}
+
+float clip_adjust_time_to_fit_range(const Clip *clip, float in_time) {
+  if (clip->looping) {
+    float duration = clip->end_time - clip->start_time;
+    if (duration <= 0) {
+      return 0.0f;
+    }
+    in_time =
+        fmodf(in_time - clip->start_time, clip->end_time - clip->start_time);
+    if (in_time < 0.0f) {
+      in_time += clip->end_time - clip->start_time;
+    }
+    in_time = in_time + clip->start_time;
+  } else {
+    if (in_time < clip->start_time) {
+      in_time = clip->start_time;
+    }
+    if (in_time > clip->end_time) {
+      in_time = clip->end_time;
+    }
+  }
+  return in_time;
+}
+
+clip_array_t clip_load_animations_from_cgltf(cgltf_data *data) {
+  u32 num_clips = data->animations_count;
+  u32 num_nodes = data->nodes_count;
+
+  clip_array_t result = array_empty(clip_array_t);
+  array_reserve(Clip, &result, num_clips);
+  result.len = num_clips;
+
+  for (u32 i = 0; i < num_clips; i++) {
+    Clip *clip = &result.ptr[i];
+    cgltf_animation *anim = &data->animations[i];
+    clip->name = anim->name;
+    u32 num_channels = (u32)anim->channels_count;
+
+    array_reserve(TransformTrack, &clip->tracks, num_channels);
+    clip->tracks.len = num_channels;
+
+    for (u32 j = 0; j < num_channels; ++j) {
+      TransformTrack *trk = &clip->tracks.ptr[j];
+      *trk = transform_track_new(j);
+      cgltf_animation_channel *channel = &anim->channels[j];
+      cgltf_node *target = channel->target_node;
+
+      int node_id = cgltf_get_node_index(target, data->nodes, num_nodes);
+
+      if (channel->target_path == cgltf_animation_path_type_translation) {
+        track_from_cgltf_channel(&trk->position, channel, FRAME_VEC3);
+      } else if (channel->target_path == cgltf_animation_path_type_scale) {
+        track_from_cgltf_channel(&trk->scale, channel, FRAME_VEC3);
+      } else if (channel->target_path == cgltf_animation_path_type_rotation) {
+        track_from_cgltf_channel(&trk->rotation, channel, FRAME_QUAT);
+      }
+    }
+
+    clip_recalculate_duration(clip);
+  }
+
+  return result;
+}
+
+float clip_duration(const Clip *clip) {
+  return clip->end_time - clip->start_time;
+}
+
+void clip_recalculate_duration(Clip *clip) {
+  clip->start_time = 0;
+  clip->end_time = 0;
+  bool start_set = false;
+  bool end_set = false;
+
+  u32 tracks_len = clip->tracks.len;
+
+  for (u32 i = 0; i < tracks_len; i++) {
+    const TransformTrack *trk = &clip->tracks.ptr[i];
+    if (transform_track_is_valid(trk)) {
+      float start_time = transform_track_start_time(trk);
+      float end_time = transform_track_end_time(trk);
+
+      if (start_time < clip->start_time || !start_set) {
+        clip->start_time = start_time;
+        start_set = true;
+      }
+
+      if (start_time > clip->end_time || !end_set) {
+        clip->end_time = end_time;
+        end_set = true;
+      }
+    }
+  }
+}
+
+TransformTrack *clip_transform_track_at(Clip *clip, u32 joint_idx) {
+  for (u32 i = 0; (usize)i < clip->tracks.len; i++) {
+    if (clip->tracks.ptr[i].id == joint_idx)
+      return &clip->tracks.ptr[i];
+  }
+
+  array_push(TransformTrack, &clip->tracks, transform_track_new(joint_idx));
+  return &clip->tracks.ptr[clip->tracks.len - 1];
+}
+
+float clip_sample(const Clip *clip, Pose *out_pose, float time) {
+  if (float_eq(clip_duration(clip), 0.0)) {
+    return 0.0f;
+  }
+  time = clip_adjust_time_to_fit_range(clip, time);
+
+  u32 len = clip->tracks.len;
+  for (u32 i = 0; i < len; i++) {
+    const TransformTrack *ttrk = &clip->tracks.ptr[i];
+    u32 joint = ttrk->id;
+    Transform local = pose_get_local_transform(out_pose, joint);
+    Transform animated =
+        transform_track_sample(ttrk, &local, time, clip->looping);
+    out_pose->joints[joint] = animated;
+  }
+
+  return time;
+}
+
+// Make sure to call `transform_convert_handedness()` if you want to use
+// this
 Transform cgltf_get_local_transform(cgltf_node *n) {
   Transform result = transform_default();
 
@@ -1215,16 +1986,26 @@ void cgltf_get_scalar_values(floatarray_t *out, u32 comp_count,
   out->len = len;
 }
 
+typedef struct {
+  Pose animated_pose;
+  mat4array_t pose_palette;
+  u32 clip_idx;
+  float t;
+  Transform model;
+} AnimationInstance;
+
 static struct {
   float rx, ry;
   sg_pipeline pip;
   sg_bindings bind;
   BoneMesh bm;
   Skeleton sk;
+  clip_array_t clips;
   Pose animated_pose;
   mat4array_t pose_palette;
   mat4array_t inv_bind_pose;
   vs_params_t vs_params;
+  AnimationInstance animation;
 } state;
 
 void set_vs_params() {
@@ -1304,24 +2085,28 @@ void init(void) {
   state.bm = meshes.ptr[0];
   state.sk = skeleton_load(data);
   pose_cpy(&state.sk.rest_pose, &state.animated_pose);
+  pose_cpy(&state.sk.rest_pose, &state.animation.animated_pose);
+  state.animation.pose_palette = array_empty(mat4array_t);
+  array_reserve(mat4, &state.animation.pose_palette, state.sk.joints_len);
   state.pose_palette = array_empty(mat4array_t);
   state.inv_bind_pose = (mat4array_t){
       .ptr = state.sk.inv_bind_pose,
       .len = state.sk.joints_len,
       .cap = state.sk.joints_len,
   };
-
-  for (u32 i = 0; i < state.bm.vertices_len; i++) {
-    vec4 weights = state.bm.weights[i];
-    float result = weights.X + weights.Y + weights.Z + weights.W;
-    safecheckf(float_eq(result, 1.0), "got: %f\n", result);
+  state.clips = clip_load_animations_from_cgltf(data);
+  for (u32 i = 0; i < state.clips.len; i++) {
+    const Clip *clip = &state.clips.ptr[i];
+    if (strcmp(clip->name, "Running") == 0) {
+      state.animation.clip_idx = i;
+    }
   }
 
 #ifdef CPU_SKIN
   bonemesh_cpu_skin(&state.bm, &state.sk, &state.animated_pose);
 #endif
 
-/* create shader */
+  /* create shader */
 #ifdef CPU_SKIN
   sg_shader shd = sg_make_shader(bonemesh_cpu_shader_desc(sg_query_backend()));
 #else
@@ -1441,6 +2226,17 @@ void frame(void) {
   const float w = sapp_widthf();
   const float h = sapp_heightf();
 
+  static u64 last_time = 0;
+  if (last_time == 0) {
+    last_time = stm_now();
+  }
+
+  // Get the current time
+  uint64_t now = stm_now();
+
+  // Calculate the delta time in seconds
+  double delta_time = stm_ms(stm_diff(now, last_time));
+
   fs_params_t fs_params;
   fs_params.light[0] = 0.0;
   fs_params.light[1] = 0.0;
@@ -1464,7 +2260,21 @@ void frame(void) {
   // HMM_Mat4 view = HMM_LookAt((HMM_Vec3){.X = 0.0f, .Y = 0.0f, .Z =
   // ZCAMERAPOS},
   //                            (HMM_Vec3){.X = 0.0f, .Y = 0.0f, .Z = 0.0f},
-  //                            (HMM_Vec3){.X = 0.0f, .Y = 1.0f, .Z = 0.0f});
+  //                            (HMM_Vec3){.X = 0.0f, .Y = 1.0f, .Z =
+  //                            0.0f});
+
+  state.animation.t = clip_sample(&state.clips.ptr[state.animation.clip_idx],
+                                  &state.animation.animated_pose,
+                                  state.animation.t + (float)delta_time);
+  pose_get_matrix_palette(&state.animation.animated_pose,
+                          &state.animation.pose_palette);
+
+  // Copy the transformation matrices for the joints
+  memcpy(&state.vs_params.pose, state.pose_palette.ptr,
+         sizeof(mat4) * state.animation.pose_palette.len);
+  // Copy the inverse transformation matrices for the bind pose of the skeleton
+  memcpy(&state.vs_params.invBindPose, state.inv_bind_pose.ptr,
+         sizeof(mat4) * state.inv_bind_pose.len);
 
   const float aspect_ratio = w / h;
   HMM_Mat4 proj =
@@ -1495,6 +2305,9 @@ void frame(void) {
   sg_draw(0, state.bm.indices.len, 1);
   sg_end_pass();
   sg_commit();
+
+  // Store the current time for the next frame
+  last_time = now;
 }
 
 void cleanup(void) { sg_shutdown(); }
