@@ -161,6 +161,7 @@ static inline vec3 vec3_convert_handedness(bool is_point, vec3 in) {
 
   return in;
 #endif
+  return in;
 }
 
 static inline vec3 vec3_new(float a, float b, float c) {
@@ -548,6 +549,33 @@ Transform transform_default() {
   return out;
 }
 
+bool transform_print(Transform *t) {
+  if (isnan(t->position.X) || isnan(t->position.Y) || isnan(t->position.Z) ||
+      isnan(t->rotation.X) || isnan(t->rotation.Y) || isnan(t->rotation.Z) ||
+      isnan(t->rotation.W) || isnan(t->scale.X) || isnan(t->scale.Y) ||
+      isnan(t->scale.Z)) {
+    if (isnan(t->position.X) || isnan(t->position.Y) || isnan(t->position.Z) ||
+        isnan(t->rotation.X) || isnan(t->rotation.Y) || isnan(t->rotation.Z) ||
+        isnan(t->rotation.W) || isnan(t->scale.X) || isnan(t->scale.Y) ||
+        isnan(t->scale.Z)) {
+      t->position = HMM_V3(0, 0, 0);
+      t->rotation = quat_new(0, 0, 0, 1);
+      t->scale = HMM_V3(1, 1, 1);
+    }
+
+    printf("One or more transform values contain NaN\n");
+    printf("Transform {\n");
+    printf("  position: vec3(%f, %f, %f),\n", t->position.X, t->position.Y,
+           t->position.Z);
+    printf("  scale: vec3(%f, %f, %f),\n", t->scale.X, t->scale.Y, t->scale.Z);
+    printf("  rotation: quat(%f, %f, %f, %f),\n", t->rotation.X, t->rotation.Y,
+           t->rotation.Z, t->rotation.W);
+    printf("}\n");
+    return true;
+  }
+  return false;
+}
+
 // Order is right -> left
 Transform transform_combine(Transform a, Transform b) {
 #ifdef TRANSFORM_USE_MATRICES
@@ -809,9 +837,11 @@ float track_adjust_time_to_fit(const track_t *trk, float time, bool looping,
                                FrameType ft);
 
 float track_start_time(const track_t *trk) {
+  safecheckf(trk->frames.len > 0, "frame len is %d", trk->frames.len);
   return frame_time(&trk->frames.ptr[0]);
 }
 float track_end_time(const track_t *trk) {
+  safecheckf(trk->frames.len > 0, "frame len is %d", trk->frames.len);
   return frame_time(&trk->frames.ptr[trk->frames.len - 1]);
 }
 
@@ -923,11 +953,13 @@ inline void track_sample(const track_t *trk, float time, bool looping,
     break;
   }
   case INTERP_LINEAR: {
-    track_sample_linear(trk, time, looping, out, ft);
+    track_sample_constant(trk, time, looping, out, ft);
+    // track_sample_linear(trk, time, looping, out, ft);
     break;
   }
   case INTERP_CUBIC: {
-    track_sample_cubic(trk, time, looping, out, ft);
+    // track_sample_cubic(trk, time, looping, out, ft);
+    track_sample_constant(trk, time, looping, out, ft);
     break;
   }
   }
@@ -1107,6 +1139,9 @@ void track_from_cgltf_channel(track_t *result,
     float _zeroes[component_count];
     ZERO(_zeroes);
     float *zeroes = (float *)(&_zeroes);
+    for (u32 i = 0; i < component_count; i++) {
+      safecheck(float_eq(zeroes[i], 0.0));
+    }
 
     switch_ft(
         ft,
@@ -1188,7 +1223,7 @@ float transform_track_start_time(const TransformTrack *trk) {
   bool is_set = false;
 
   if (trk->position.frames.len > 1) {
-    result = track_start_time(&trk->rotation);
+    result = track_start_time(&trk->position);
     is_set = true;
   }
 
@@ -1250,6 +1285,7 @@ Transform transform_track_sample(const TransformTrack *trk,
                                  const Transform *ref, float time,
                                  bool looping) {
   Transform result = *ref;
+  // only assign if animated
   if (trk->position.frames.len > 1) {
     track_sample(&trk->position, time, looping, &result.position, FRAME_VEC3);
   }
@@ -1420,11 +1456,21 @@ Pose pose_load_bind_pose_from_cgltf(cgltf_data *data, Pose rest_pose) {
   return bind_pose;
 }
 
+void mat4_print(const mat4 *m) {
+  printf("[");
+  float *f = (float *)&m->Elements;
+  for (u32 i = 0; i < 16; i++) {
+    printf("%f,", f[i]);
+  }
+  printf("]");
+  printf("\n");
+}
+
 // When passing to GPU, pose needs to be converted to a linear array of
 // matrices
 void pose_get_matrix_palette(const Pose *pose, mat4array_t *matrices) {
-  safecheckf(matrices->len == 0, "matrices len is 0 (got %zu)\n",
-             matrices->len);
+  safecheckf(matrices->len == 0 || matrices->len == pose->len,
+             "matrices len is %zu\n", matrices->len);
 
   if (matrices->cap != pose->len) {
     array_reserve(mat4, matrices, pose->len);
@@ -1432,8 +1478,10 @@ void pose_get_matrix_palette(const Pose *pose, mat4array_t *matrices) {
 
   for (u32 i = 0; i < pose->len; i++) {
     Transform t = pose_get_global_transform(pose, i);
-    matrices->ptr[matrices->len++] = transform_to_mat4(t);
+    matrices->ptr[i] = transform_to_mat4(t);
+    // mat4_print(&matrices->ptr[i]);
   }
+  matrices->len = pose->len;
 }
 
 // bool pose_eq(const Pose *a, const Pose *b) {
@@ -1810,20 +1858,18 @@ clip_array_t clip_load_animations_from_cgltf(cgltf_data *data) {
 
   for (u32 i = 0; i < num_clips; i++) {
     Clip *clip = &result.ptr[i];
+    *clip = clip_new();
     cgltf_animation *anim = &data->animations[i];
     clip->name = anim->name;
     u32 num_channels = (u32)anim->channels_count;
-
     array_reserve(TransformTrack, &clip->tracks, num_channels);
-    clip->tracks.len = num_channels;
 
     for (u32 j = 0; j < num_channels; ++j) {
-      TransformTrack *trk = &clip->tracks.ptr[j];
-      *trk = transform_track_new(j);
       cgltf_animation_channel *channel = &anim->channels[j];
       cgltf_node *target = channel->target_node;
 
       int node_id = cgltf_get_node_index(target, data->nodes, num_nodes);
+      TransformTrack *trk = clip_transform_track_at(clip, node_id);
 
       if (channel->target_path == cgltf_animation_path_type_translation) {
         track_from_cgltf_channel(&trk->position, channel, FRAME_VEC3);
@@ -1834,6 +1880,7 @@ clip_array_t clip_load_animations_from_cgltf(cgltf_data *data) {
       }
     }
 
+    // clip->tracks.len = num_channels;
     clip_recalculate_duration(clip);
   }
 
@@ -1858,6 +1905,8 @@ void clip_recalculate_duration(Clip *clip) {
       float start_time = transform_track_start_time(trk);
       float end_time = transform_track_end_time(trk);
 
+      printf("START: %f END: %f\n", start_time, end_time);
+
       if (start_time < clip->start_time || !start_set) {
         clip->start_time = start_time;
         start_set = true;
@@ -1877,8 +1926,9 @@ TransformTrack *clip_transform_track_at(Clip *clip, u32 joint_idx) {
       return &clip->tracks.ptr[i];
   }
 
+  u32 idx = clip->tracks.len;
   array_push(TransformTrack, &clip->tracks, transform_track_new(joint_idx));
-  return &clip->tracks.ptr[clip->tracks.len - 1];
+  return &clip->tracks.ptr[idx];
 }
 
 float clip_sample(const Clip *clip, Pose *out_pose, float time) {
@@ -1892,8 +1942,12 @@ float clip_sample(const Clip *clip, Pose *out_pose, float time) {
     const TransformTrack *ttrk = &clip->tracks.ptr[i];
     u32 joint = ttrk->id;
     Transform local = pose_get_local_transform(out_pose, joint);
+    if (transform_print(&local)) {
+      safecheck(false);
+    }
     Transform animated =
         transform_track_sample(ttrk, &local, time, clip->looping);
+    // transform_print(&animated);
     out_pose->joints[joint] = animated;
   }
 
@@ -2081,25 +2135,43 @@ void init(void) {
     exit(1);
   }
 
+  state.animation = (AnimationInstance){
+      .clip_idx = 0,
+      .t = 0,
+      .model = transform_default(),
+  };
+
+  state.clips = clip_load_animations_from_cgltf(data);
   bonemesh_array_t meshes = bonemesh_load_meshes(data);
   state.bm = meshes.ptr[0];
   state.sk = skeleton_load(data);
   pose_cpy(&state.sk.rest_pose, &state.animated_pose);
   pose_cpy(&state.sk.rest_pose, &state.animation.animated_pose);
   state.animation.pose_palette = array_empty(mat4array_t);
-  array_reserve(mat4, &state.animation.pose_palette, state.sk.joints_len);
+  array_reserve(mat4, &state.animation.pose_palette, state.sk.rest_pose.len);
+
   state.pose_palette = array_empty(mat4array_t);
   state.inv_bind_pose = (mat4array_t){
       .ptr = state.sk.inv_bind_pose,
       .len = state.sk.joints_len,
       .cap = state.sk.joints_len,
   };
-  state.clips = clip_load_animations_from_cgltf(data);
+
+  printf("CLIPS: %zu\n", state.clips.len);
   for (u32 i = 0; i < state.clips.len; i++) {
     const Clip *clip = &state.clips.ptr[i];
-    if (strcmp(clip->name, "Running") == 0) {
+    if (clip->name == NULL)
+      continue;
+    printf("NAME: %s\n", clip->name);
+    if (strcmp(clip->name, "Walking") == 0) {
+      printf("FOUND: %s\n", clip->name);
       state.animation.clip_idx = i;
     }
+  }
+
+  Clip *clip = &state.clips.ptr[state.animation.clip_idx];
+  printf("CLIP TRACKS: %zu\n", clip->tracks.len);
+  for (u32 i = 0; i < clip->tracks.len; i++) {
   }
 
 #ifdef CPU_SKIN
@@ -2220,22 +2292,15 @@ void init(void) {
   state.bind.fs.samplers[SLOT_smp] = sg_make_sampler(&(sg_sampler_desc){0});
 
   set_vs_params();
+  stm_setup();
 }
 
+static u64 last_time = 0;
 void frame(void) {
   const float w = sapp_widthf();
   const float h = sapp_heightf();
 
-  static u64 last_time = 0;
-  if (last_time == 0) {
-    last_time = stm_now();
-  }
-
-  // Get the current time
-  uint64_t now = stm_now();
-
-  // Calculate the delta time in seconds
-  double delta_time = stm_ms(stm_diff(now, last_time));
+  double delta_time = stm_sec(stm_laptime(&last_time));
 
   fs_params_t fs_params;
   fs_params.light[0] = 0.0;
@@ -2266,13 +2331,18 @@ void frame(void) {
   state.animation.t = clip_sample(&state.clips.ptr[state.animation.clip_idx],
                                   &state.animation.animated_pose,
                                   state.animation.t + (float)delta_time);
+
+  // printf("animt %f delta_time %f last_time %llu\n", state.animation.t,
+  //        (float)delta_time, last_time);
+
   pose_get_matrix_palette(&state.animation.animated_pose,
                           &state.animation.pose_palette);
 
   // Copy the transformation matrices for the joints
-  memcpy(&state.vs_params.pose, state.pose_palette.ptr,
+  memcpy(&state.vs_params.pose, state.animation.pose_palette.ptr,
          sizeof(mat4) * state.animation.pose_palette.len);
-  // Copy the inverse transformation matrices for the bind pose of the skeleton
+  // Copy the inverse transformation matrices for the bind pose of the
+  // skeleton
   memcpy(&state.vs_params.invBindPose, state.inv_bind_pose.ptr,
          sizeof(mat4) * state.inv_bind_pose.len);
 
@@ -2284,6 +2354,8 @@ void frame(void) {
   state.ry += 1.0f * t;
   state.rx += 1.0f * t;
   HMM_Mat4 rym = HMM_Rotate(state.ry, (HMM_Vec3){{0.0f, 1.0f, 0.0f}});
+  // HMM_Mat4 rym = HMM_M4D(1.0);
+
   HMM_Mat4 rxm = HMM_Rotate(state.rx, (HMM_Vec3){{1.0f, 0.0f, 0.0f}});
   HMM_Mat4 model =
       HMM_MulM4(HMM_Translate(HMM_V3(0.0, -0.5, ZPOS)),
@@ -2305,9 +2377,6 @@ void frame(void) {
   sg_draw(0, state.bm.indices.len, 1);
   sg_end_pass();
   sg_commit();
-
-  // Store the current time for the next frame
-  last_time = now;
 }
 
 void cleanup(void) { sg_shutdown(); }
