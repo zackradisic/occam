@@ -757,8 +757,6 @@ static inline float interpolate_scalar(float a, float b, float t) {
 }
 
 static inline vec3 interpolate_vec3(vec3 a, vec3 b, float t) {
-  printf("T: %f START: (%f, %f, %f) END: (%f, %f, %f)\n", t, a.X, a.Y, a.Z, b.X,
-         b.Y, b.Z);
   return vec3_new(a.X + (b.X - a.X) * t, a.Y + (b.Y - a.Y) * t,
                   a.Z + (b.Z - a.Z) * t);
 }
@@ -1054,9 +1052,6 @@ void track_sample_linear(const track_t *trk, float time, bool looping,
                             vec3 start, end;
                             track_value_at_index(trk, &start, frame, ft);
                             track_value_at_index(trk, &end, next_frame, ft);
-                            printf("(%d) Start: (%f, %f, %f)\n", frame, start.X,
-                                   start.Y, start.Z);
-                            printf("End: (%f, %f, %f)\n", end.X, end.Y, end.Z);
                             *x = interpolate_vec3(start, end, t);
                           }),
                           ({
@@ -1070,7 +1065,6 @@ void track_sample_cubic(const track_t *trk, float time, bool looping, void *out,
                         FrameType ft) {
   int frame = track_frame_index(trk, time, looping, ft);
   if (frame < 0 || frame >= (int)(trk->frames.len - 1)) {
-    printf("NO DELTA\n");
     track_default_sample(trk, out, ft);
     return;
   }
@@ -1080,7 +1074,6 @@ void track_sample_cubic(const track_t *trk, float time, bool looping, void *out,
   float frame_delta = track_time_at_index(trk, next_frame, ft) -
                       track_time_at_index(trk, frame, ft);
   if (flte_zero(frame_delta)) {
-    printf("NO DELTA\n");
     return track_default_sample(trk, out, ft);
   }
 
@@ -1358,15 +1351,12 @@ Transform transform_track_sample(const TransformTrack *trk,
   Transform result = *ref;
   // only assign if animated
   if (trk->position.frames.len > 1) {
-    printf("ANIMATED POS\n");
     track_sample(&trk->position, time, looping, &result.position, FRAME_VEC3);
   }
   if (trk->rotation.frames.len > 1) {
-    printf("ANIMATED ROT\n");
     track_sample(&trk->rotation, time, looping, &result.rotation, FRAME_QUAT);
   }
   if (trk->scale.frames.len > 1) {
-    printf("ANIMATED SCL\n");
     track_sample(&trk->scale, time, looping, &result.scale, FRAME_VEC3);
   }
   return result;
@@ -1966,9 +1956,6 @@ float clip_duration(const Clip *clip) {
 }
 
 void clip_recalculate_duration(Clip *clip) {
-  if (strcmp(clip->name, "Running")) {
-    printf("\n");
-  }
   clip->start_time = 0;
   clip->end_time = 0;
   bool start_set = false;
@@ -1981,10 +1968,6 @@ void clip_recalculate_duration(Clip *clip) {
     if (transform_track_is_valid(trk)) {
       float start_time = transform_track_start_time(trk);
       float end_time = transform_track_end_time(trk);
-
-      if (strcmp(clip->name, "Running")) {
-        printf("START: %f END: %f\n", start_time, end_time);
-      }
 
       if (start_time < clip->start_time || !start_set) {
         clip->start_time = start_time;
@@ -2013,50 +1996,28 @@ TransformTrack *clip_transform_track_at(Clip *clip, u32 joint_idx) {
 float clip_sample(const Clip *clip, Pose *out_pose, float time) {
 #define TR_PRINT_PANIC
   // #define TR_PRINT_DEFAULT
-  printf("SYSTIME: %f\n", time);
   if (float_eq(clip_duration(clip), 0.0)) {
     return 0.0f;
   }
   time = clip_adjust_time_to_fit_range(clip, time);
-  printf("ADJUSTED TIME: %f\n", time);
 
   u32 len = clip->tracks.len;
   for (u32 i = 0; i < len; i++) {
     const TransformTrack *ttrk = &clip->tracks.ptr[i];
     u32 joint = ttrk->id;
-    printf("ANIMATING: %s\n", JOINT_NAMES[joint]);
-    if (strcmp(JOINT_NAMES[joint], "Hips") == 0) {
-      printf("ON THE HIPS!\n");
-    }
     // left handed:
     // anim = matToLeft*matAnim*matToRight
     Transform local = pose_get_local_transform(out_pose, joint);
     // right handed:
     // matAnimLeftHanded = matToRight*matToLeft*matAnim*matToRight
     transform_maybe_flip_hand(&local);
-    if (transform_print(&local, "name", true)) {
-#ifdef TR_PRINT_PANIC
-      safecheck(false);
-#endif
-    }
     Transform animated =
         transform_track_sample(ttrk, &local, time, clip->looping);
-    if (transform_print(&animated, "animated1", true)) {
-#ifdef TR_PRINT_PANIC
-      safecheck(false);
-#endif
-    }
     // left handed:
     // matAnimLeftHanded = matToRight*matToLeft*matAnim*matToRight
     transform_maybe_flip_hand(&animated);
-    if (transform_print(&animated, "animated2", false)) {
-#ifdef TR_PRINT_PANIC
-      safecheck(false);
-#endif
-    }
     // transform_print(&animated);
     out_pose->joints[joint] = animated;
-    printf("DONE ANIMATING\n\n\n");
   }
 
   return time;
@@ -2269,13 +2230,13 @@ void init(void) {
 
   printf("CLIPS: %zu\n", state.clips.len);
   for (u32 i = 0; i < state.clips.len; i++) {
-    const Clip *clip = &state.clips.ptr[i];
+    Clip *clip = &state.clips.ptr[i];
     if (clip->name == NULL)
       continue;
     printf("NAME: %s\n", clip->name);
     if (strcmp(clip->name, "Running") == 0) {
-      printf("FOUND: %s\n", clip->name);
       state.animation.clip_idx = i;
+      clip->looping = true;
     }
   }
 
@@ -2443,8 +2404,8 @@ void frame(void) {
                                   &state.animation.animated_pose,
                                   state.animation.t + (float)delta_time);
 
-  printf("animt %f delta_time %f last_time %llu\n", state.animation.t,
-         (float)delta_time, last_time);
+  // printf("animt %f delta_time %f last_time %llu\n", state.animation.t,
+  //        (float)delta_time, last_time);
 
   pose_get_matrix_palette(&state.animation.animated_pose,
                           &state.animation.pose_palette);
@@ -2464,8 +2425,8 @@ void frame(void) {
 
   state.ry += 1.0f * t;
   state.rx += 1.0f * t;
-  // HMM_Mat4 rym = HMM_Rotate(state.ry, (HMM_Vec3){{0.0f, 1.0f, 0.0f}});
-  HMM_Mat4 rym = HMM_M4D(1.0);
+  HMM_Mat4 rym = HMM_Rotate(state.ry, (HMM_Vec3){{0.0f, 1.0f, 0.0f}});
+  // HMM_Mat4 rym = HMM_M4D(1.0);
 
   HMM_Mat4 rxm = HMM_Rotate(state.rx, (HMM_Vec3){{1.0f, 0.0f, 0.0f}});
   HMM_Mat4 model =
