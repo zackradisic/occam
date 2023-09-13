@@ -2,6 +2,8 @@
 #define HANDMADE_MATH_NO_SSE
 #define HANDMADE_MATH_USE_DEGREES
 
+#define DEBUG 1
+
 // #define CPU_SKIN
 
 #define SOKOL_IMPL
@@ -217,13 +219,6 @@ void convertRHtoLH(float mat[4][4]) {
   for (int i = 0; i < 4; ++i) {
     mat[i][2] = -mat[i][2];
   }
-}
-
-void convertm4(mat4 *m) {
-#ifdef LEFT_HANDED
-  convertRHtoLH(m->Elements);
-#else
-#endif
 }
 
 static inline quat quat_new(float X, float Y, float Z, float W) {
@@ -711,12 +706,7 @@ mat4 transform_to_mat4(Transform t) {
 #else
   mat4 out;
   out = HMM_Scale(t.scale);
-#ifdef LEFT_HANDED
-  out = HMM_MulM4(HMM_QToM4(t.rotation), out);
-  // out = HMM_MulM4(quat_to_mat4(t.rotation), out);
-#else
   out = HMM_MulM4(quat_to_mat4(t.rotation), out);
-#endif
   out = HMM_MulM4(HMM_Translate(t.position), out);
   return out;
 #endif
@@ -973,18 +963,18 @@ float track_adjust_time_to_fit(const track_t *trk, float time, bool looping,
 
 float track_time_at_index(const track_t *trk, int idx, FrameType ft) {
   switch_ft(
-      ft, { return frame_time(slice_ref(scalar_frame_t, trk->frames, idx)); },
-      { return frame_time(slice_ref(vec3_frame_t, trk->frames, idx)); },
-      { return frame_time(slice_ref(quat_frame_t, trk->frames, idx)); });
+      ft, { return frame_time(array_ref(scalar_frame_t, &trk->frames, idx)); },
+      { return frame_time(array_ref(vec3_frame_t, &trk->frames, idx)); },
+      { return frame_time(array_ref(quat_frame_t, &trk->frames, idx)); });
 }
 
 inline void track_value_at_index(const track_t *trk, void *out, int idx,
                                  FrameType ft) {
   switch_ft_set_out(
       ft, out,
-      frame_value(scalar_frame_t, slice_ref(scalar_frame_t, trk->frames, idx)),
-      frame_value(vec3_frame_t, slice_ref(vec3_frame_t, trk->frames, idx)),
-      frame_value(quat_frame_t, slice_ref(quat_frame_t, trk->frames, idx)));
+      frame_value(scalar_frame_t, array_ref(scalar_frame_t, &trk->frames, idx)),
+      frame_value(vec3_frame_t, array_ref(vec3_frame_t, &trk->frames, idx)),
+      frame_value(quat_frame_t, array_ref(quat_frame_t, &trk->frames, idx)));
 }
 
 inline void track_default_sample(const track_t *trk, void *out, FrameType ft) {
@@ -1082,39 +1072,41 @@ void track_sample_cubic(const track_t *trk, float time, bool looping, void *out,
       ft, out, x,
       {
         float point1 = frame_value(
-            scalar_frame_t, slice_ref(scalar_frame_t, trk->frames, frame));
-        float slope1 = frame_out(scalar_frame_t,
-                                 slice_ref(scalar_frame_t, trk->frames, frame));
-        float point2 = frame_value(
-            scalar_frame_t, slice_ref(scalar_frame_t, trk->frames, next_frame));
-        float slope2 = frame_out(
-            scalar_frame_t, slice_ref(scalar_frame_t, trk->frames, next_frame));
+            scalar_frame_t, array_ref(scalar_frame_t, &trk->frames, frame));
+        float slope1 = frame_out(
+            scalar_frame_t, array_ref(scalar_frame_t, &trk->frames, frame));
+        float point2 =
+            frame_value(scalar_frame_t,
+                        array_ref(scalar_frame_t, &trk->frames, next_frame));
+        float slope2 =
+            frame_out(scalar_frame_t,
+                      array_ref(scalar_frame_t, &trk->frames, next_frame));
         slope1 = slope1 * frame_delta;
         slope2 = slope2 * frame_delta;
         *x = hermite_scalar(t, point1, slope1, point2, slope2);
       },
       {
         vec3 point1 = frame_value(vec3_frame_t,
-                                  slice_ref(vec3_frame_t, trk->frames, frame));
+                                  array_ref(vec3_frame_t, &trk->frames, frame));
         vec3 slope1 = frame_out(vec3_frame_t,
-                                slice_ref(vec3_frame_t, trk->frames, frame));
+                                array_ref(vec3_frame_t, &trk->frames, frame));
         vec3 point2 = frame_value(
-            vec3_frame_t, slice_ref(vec3_frame_t, trk->frames, next_frame));
+            vec3_frame_t, array_ref(vec3_frame_t, &trk->frames, next_frame));
         vec3 slope2 = frame_out(
-            vec3_frame_t, slice_ref(vec3_frame_t, trk->frames, next_frame));
+            vec3_frame_t, array_ref(vec3_frame_t, &trk->frames, next_frame));
         slope1 = HMM_MulV3F(slope1, frame_delta);
         slope2 = HMM_MulV3F(slope2, frame_delta);
         *x = hermite_vec3(t, point1, slope1, point2, slope2);
       },
       {
         quat point1 = frame_value(quat_frame_t,
-                                  slice_ref(quat_frame_t, trk->frames, frame));
+                                  array_ref(quat_frame_t, &trk->frames, frame));
         quat slope1 = frame_out(quat_frame_t,
-                                slice_ref(quat_frame_t, trk->frames, frame));
+                                array_ref(quat_frame_t, &trk->frames, frame));
         quat point2 = frame_value(
-            quat_frame_t, slice_ref(quat_frame_t, trk->frames, next_frame));
+            quat_frame_t, array_ref(quat_frame_t, &trk->frames, next_frame));
         quat slope2 = frame_out(
-            quat_frame_t, slice_ref(quat_frame_t, trk->frames, next_frame));
+            quat_frame_t, array_ref(quat_frame_t, &trk->frames, next_frame));
         slope1 = HMM_MulQF(slope1, frame_delta);
         slope2 = HMM_MulQF(slope2, frame_delta);
         *x = hermite_quat(t, point1, slope1, point2, slope2);
@@ -1447,7 +1439,7 @@ Pose pose_load_rest_pose_from_cgltf(cgltf_data *data) {
   for (usize i = 0; i < bone_count; i++) {
     cgltf_node *node = &data->nodes[i];
     Transform transform = cgltf_get_local_transform(node);
-    transform_convert_handedness(&transform);
+    // transform_convert_handedness(&transform);
     out.joints[i] = transform;
     int parent = cgltf_get_node_index(node->parent, data->nodes, bone_count);
     out.parents[i] = parent;
@@ -1492,7 +1484,7 @@ Pose pose_load_bind_pose_from_cgltf(cgltf_data *data, Pose rest_pose) {
       mat4 inv_bind_matrix = mat4_new_from_arr(matrix);
       mat4 bind_matrix = HMM_InvGeneralM4(inv_bind_matrix);
       Transform bind_transform = transform_from_mat4_rh(&bind_matrix);
-      transform_convert_handedness(&bind_transform);
+      // transform_convert_handedness(&bind_transform);
       cgltf_node *joint_node = skin->joints[j];
       int joint_index =
           cgltf_get_node_index(joint_node, data->nodes, data->nodes_count);
@@ -1542,6 +1534,7 @@ void pose_get_matrix_palette(const Pose *pose, mat4array_t *matrices) {
 
   for (u32 i = 0; i < pose->len; i++) {
     Transform t = pose_get_global_transform(pose, i);
+    transform_convert_handedness(&t);
     matrices->ptr[i] = transform_to_mat4(t);
     // mat4_print(&matrices->ptr[i]);
   }
@@ -1589,6 +1582,7 @@ void skeleton_update_inverse_bind_pose(Skeleton *sk) {
   u32 size = sk->bind_pose.len;
   for (u32 i = 0; i < size; i++) {
     Transform world = pose_get_global_transform(&sk->bind_pose, i);
+    transform_convert_handedness(&world);
     sk->inv_bind_pose[i] = HMM_InvGeneralM4(transform_to_mat4(world));
   }
 }
@@ -2008,14 +2002,16 @@ float clip_sample(const Clip *clip, Pose *out_pose, float time) {
     // left handed:
     // anim = matToLeft*matAnim*matToRight
     Transform local = pose_get_local_transform(out_pose, joint);
+
     // right handed:
     // matAnimLeftHanded = matToRight*matToLeft*matAnim*matToRight
-    transform_maybe_flip_hand(&local);
+    // transform_maybe_flip_hand(&local);
     Transform animated =
         transform_track_sample(ttrk, &local, time, clip->looping);
+
     // left handed:
     // matAnimLeftHanded = matToRight*matToLeft*matAnim*matToRight
-    transform_maybe_flip_hand(&animated);
+    // transform_maybe_flip_hand(&animated);
     // transform_print(&animated);
     out_pose->joints[joint] = animated;
   }

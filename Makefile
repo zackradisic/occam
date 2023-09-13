@@ -2,7 +2,7 @@ CC=clang
 DEBUG=true
 # OPTIMIZATION=-g3 -O0 -flto
 OPTIMIZATION=-g3 -O0 
-DISABLED_WARNINGS=-Wno-unused-but-set-variable -Wno-unused-variable -Wno-unused-function -Wno-unused-command-line-argument -Wno-unused-parameter -Wno-missing-braces
+DISABLED_WARNINGS=-Wno-unused-but-set-variable -Wno-unused-variable -Wno-unused-function -Wno-unused-command-line-argument -Wno-unused-parameter -Wno-missing-braces -Wno-unused-value
 C_FLAGS=-Wall -Wextra -Werror $(DISABLED_WARNINGS) -std=c11 $(OPTIMIZATION) -D_THREAD_SAFE
 LD_FLAGS=-I./src -I./lib/
 OUT_DIR=out

@@ -4,7 +4,6 @@
 #include <_types/_uint16_t.h>
 #include <_types/_uint32_t.h>
 #include <_types/_uint8_t.h>
-#define DEBUG 1
 
 #if DEBUG
 #define SAFECHECK_ENABLED 1

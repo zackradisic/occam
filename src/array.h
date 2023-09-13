@@ -8,7 +8,17 @@ ASSUME_NONNULL_BEGIN
 typedef struct {
   u8 *maybe_null ptr;
   usize len;
-  usize cap;
+} slice_t;
+
+typedef union {
+  struct {
+    slice_t slice;
+  };
+  struct {
+    u8 *maybe_null ptr;
+    usize len;
+    usize cap;
+  };
 } array_t;
 
 #define array_type(T)                                                          \
@@ -18,10 +28,18 @@ typedef struct {
     usize cap;                                                                 \
   }
 
-typedef struct {
-  u8 *maybe_null ptr;
-  usize len;
-} slice_t;
+#define array_type_with_slice(T, Slice)                                        \
+  union {                                                                      \
+    struct {                                                                   \
+      Slice slice;                                                             \
+    };                                                                         \
+                                                                               \
+    struct {                                                                   \
+      T *maybe_null ptr;                                                       \
+      usize len;                                                               \
+      usize cap;                                                               \
+    };                                                                         \
+  }
 
 #define slice_type(T)                                                          \
   struct {                                                                     \
@@ -31,21 +49,26 @@ typedef struct {
 
 #define slice_empty(T) ((T){.ptr = NULL, .len = 0})
 
-#define slice_index_checked(T, s, i)                                           \
-  ((usize)(i) >= 0 && (usize)(i) < (s).len                                     \
-       ? cast_ptr(T, (s).ptr)[i]                                               \
-       : safefail("out of bounds 0 <= %d < %d", i, (s).len))
-#define slice_ref_checked(T, s, i)                                             \
-  ((usize)(i) >= 0 && (usize)(i) < (s).len                                     \
-       ? &cast_ptr(T, (s).ptr)[i]                                              \
-       : safefail("out of bounds 0 <= %d < %d", i, (s).len))
+#define array_index_checked(T, s, i)                                           \
+  (safecheck((usize)i < (s)->len), (cast_ptr(T, (s)->ptr)[i])
+
+#define array_ref_checked(T, s, i)                                             \
+  (safecheck((usize)i < (s)->len), &cast_ptr(T, (s)->ptr)[i])
+
+#if DEBUG
+#ifndef DISABLE_SAFE_INDEX
+#define SAFE_INDEX
+#endif
+#endif
 
 #ifdef SAFE_INDEX
-#define slice_index(T, s, i) slice_index_checked(T, s, i)
-#define slice_ref(T, s, i) slice_ref_checked(T, s, i)
+#define array_index(T, s, i) array_index_checked(T, s, i)
+#define array_ref(T, s, i) array_ref_checked(T, s, i)
+
 #else
-#define slice_index(T, s, i) cast_ptr(T, (s).ptr)[i]
-#define slice_ref(T, s, i) &cast_ptr(T, (s).ptr)[i]
+#define array_index(T, s, i) cast_ptr(T, (s)->ptr)[i]
+#define array_ref(T, s, i) &cast_ptr(T, (s)->ptr)[i]
+
 #endif
 
 slice_t _array_as_slice(array_t *arr) {
