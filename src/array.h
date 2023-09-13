@@ -31,6 +31,23 @@ typedef struct {
 
 #define slice_empty(T) ((T){.ptr = NULL, .len = 0})
 
+#define slice_index_checked(T, s, i)                                           \
+  ((usize)(i) >= 0 && (usize)(i) < (s).len                                     \
+       ? cast_ptr(T, (s).ptr)[i]                                               \
+       : safefail("out of bounds 0 <= %d < %d", i, (s).len))
+#define slice_ref_checked(T, s, i)                                             \
+  ((usize)(i) >= 0 && (usize)(i) < (s).len                                     \
+       ? &cast_ptr(T, (s).ptr)[i]                                              \
+       : safefail("out of bounds 0 <= %d < %d", i, (s).len))
+
+#ifdef SAFE_INDEX
+#define slice_index(T, s, i) slice_index_checked(T, s, i)
+#define slice_ref(T, s, i) slice_ref_checked(T, s, i)
+#else
+#define slice_index(T, s, i) cast_ptr(T, (s).ptr)[i]
+#define slice_ref(T, s, i) &cast_ptr(T, (s).ptr)[i]
+#endif
+
 slice_t _array_as_slice(array_t *arr) {
   return (slice_t){
       .ptr = arr->ptr,

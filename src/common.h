@@ -30,6 +30,7 @@ typedef uint64_t u64;
 typedef size_t usize;
 
 int float_eq(float a, float b);
+#define flte_zero(a) (a) <= FLT_EPSILON ? true : false
 
 #define ZMEM_HAVE_POSIX_MEMALIGN
 #define ZMEM_L1_CACHE_LINE_SIZE 64

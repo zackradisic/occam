@@ -9,8 +9,8 @@
 // #define SOKOL_GLCORE33
 // #endif
 
-#define SOKOL_METAL
-// #define SOKOL_GLCORE33
+// #define SOKOL_METAL
+#define SOKOL_GLCORE33
 
 // #include "../lib/sokol/sokol_app.h"
 // #include "../lib/sokol/sokol_gfx.h"

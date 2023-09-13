@@ -98,6 +98,8 @@ typedef array_type(mat4) mat4array_t;
 typedef array_type(float) floatarray_t;
 typedef array_type(u32) u32array_t;
 
+static char **JOINT_NAMES = NULL;
+
 int cgltf_get_node_index(cgltf_node *target, cgltf_node *nodes, u32 nodes_len);
 void cgltf_get_scalar_values(floatarray_t *out, u32 comp_count,
                              const cgltf_accessor *in_accessor);
@@ -290,6 +292,20 @@ quat quat_mul_quat(quat Q1, quat Q2) {
                   -Q2.X * Q1.Z + Q2.Y * Q1.W + Q2.Z * Q1.X + Q2.W * Q1.Y,
                   Q2.X * Q1.Y - Q2.Y * Q1.X + Q2.Z * Q1.W + Q2.W * Q1.Z,
                   -Q2.X * Q1.X - Q2.Y * Q1.Y - Q2.Z * Q1.Z + Q2.W * Q1.W);
+}
+
+quat quat_norm(quat q) {
+  float lenSq = q.X * q.X + q.Y * q.Y + q.Z * q.Z + q.W * q.W;
+  if (lenSq < QUAT_EPSILON) {
+    return q;
+  }
+  float i_len = 1.0f / sqrtf(lenSq);
+
+  q.X *= i_len;
+  q.Y *= i_len;
+  q.Z *= i_len;
+  q.W *= i_len;
+  return q;
 }
 
 quat quat_inverse(quat q) {
@@ -520,6 +536,17 @@ Transform cgltf_get_local_transform(cgltf_node *n);
 // values, this is because glTF uses a right handed coordinate system.
 void transform_convert_handedness(Transform *t);
 
+void transform_maybe_flip_hand(Transform *t) {
+#ifdef LEFT_HANDED
+  mat4 m = quat_to_mat4(t->rotation);
+  m = HMM_MulM4(MAT4_CONVERT_HAND, m);
+
+  t->rotation = quat_from_mat4_rh(m);
+  t->position.Z *= -1;
+#else
+#endif
+}
+
 void transform_convert_handedness(Transform *t) {
 #ifdef LEFT_HANDED
 #ifdef TRANSFORM_USE_MATRICES
@@ -549,21 +576,22 @@ Transform transform_default() {
   return out;
 }
 
-bool transform_print(Transform *t) {
+bool transform_print(Transform *t, const char *name, bool print_non_nan) {
   if (isnan(t->position.X) || isnan(t->position.Y) || isnan(t->position.Z) ||
       isnan(t->rotation.X) || isnan(t->rotation.Y) || isnan(t->rotation.Z) ||
       isnan(t->rotation.W) || isnan(t->scale.X) || isnan(t->scale.Y) ||
-      isnan(t->scale.Z)) {
-    if (isnan(t->position.X) || isnan(t->position.Y) || isnan(t->position.Z) ||
-        isnan(t->rotation.X) || isnan(t->rotation.Y) || isnan(t->rotation.Z) ||
-        isnan(t->rotation.W) || isnan(t->scale.X) || isnan(t->scale.Y) ||
-        isnan(t->scale.Z)) {
-      t->position = HMM_V3(0, 0, 0);
-      t->rotation = quat_new(0, 0, 0, 1);
-      t->scale = HMM_V3(1, 1, 1);
-    }
+      isnan(t->scale.Z) || isinf(t->position.X) || isinf(t->position.Y) ||
+      isinf(t->position.Z) || isinf(t->rotation.X) || isinf(t->rotation.Y) ||
+      isinf(t->rotation.Z) || isinf(t->rotation.W) || isinf(t->scale.X) ||
+      isinf(t->scale.Y) || isinf(t->scale.Z)) {
 
-    printf("One or more transform values contain NaN\n");
+#ifdef TR_PRINT_DEFAULT
+    t->position = HMM_V3(0, 0, 0);
+    t->rotation = quat_new(0, 0, 0, 1);
+    t->scale = HMM_V3(1, 1, 1);
+#endif
+
+    printf("(%s) One or more transform values contain NaN\n", name);
     printf("Transform {\n");
     printf("  position: vec3(%f, %f, %f),\n", t->position.X, t->position.Y,
            t->position.Z);
@@ -572,6 +600,17 @@ bool transform_print(Transform *t) {
            t->rotation.Z, t->rotation.W);
     printf("}\n");
     return true;
+  }
+  if (print_non_nan) {
+
+    printf("(%s) No NaNs!\n", name);
+    printf("Transform {\n");
+    printf("  position: vec3(%f, %f, %f),\n", t->position.X, t->position.Y,
+           t->position.Z);
+    printf("  scale: vec3(%f, %f, %f),\n", t->scale.X, t->scale.Y, t->scale.Z);
+    printf("  rotation: quat(%f, %f, %f, %f),\n", t->rotation.X, t->rotation.Y,
+           t->rotation.Z, t->rotation.W);
+    printf("}\n");
   }
   return false;
 }
@@ -698,11 +737,14 @@ typedef enum {
 u8 frame_type_float_count(FrameType ft) {
   switch (ft) {
   case FRAME_SCALAR:
-    return components(float, float);
+    // return components(float, float);
+    return 1;
   case FRAME_VEC3:
-    return components(vec3, float);
+    // return components(vec3, float);
+    return 3;
   case FRAME_QUAT:
-    return components(quat, float);
+    // return components(quat, float);
+    return 4;
   }
 }
 
@@ -715,6 +757,8 @@ static inline float interpolate_scalar(float a, float b, float t) {
 }
 
 static inline vec3 interpolate_vec3(vec3 a, vec3 b, float t) {
+  printf("T: %f START: (%f, %f, %f) END: (%f, %f, %f)\n", t, a.X, a.Y, a.Z, b.X,
+         b.Y, b.Z);
   return vec3_new(a.X + (b.X - a.X) * t, a.Y + (b.Y - a.Y) * t,
                   a.Z + (b.Z - a.Z) * t);
 }
@@ -724,7 +768,9 @@ static inline quat interpolate_quat(quat a, quat b, float t) {
   if (quat_dot(a, b) < 0) {
     result = quat_mix(a, HMM_MulQF(b, -1), t);
   }
-  return HMM_NormQ(result);
+  // result = HMM_NormQ(result);
+  result = quat_norm(result);
+  return result;
 }
 
 static inline float hermite_scalar(float t, float p1, float s1, float _p2,
@@ -771,6 +817,7 @@ static inline quat hermite_quat(float t, quat p1, quat s1, quat _p2, quat s2) {
   float ttt = tt * t;
 
   quat p2 = _p2;
+  quat_neighborhood(&p1, &p2);
 
   float h1 = 2.0f * ttt - 3.0f * tt + 1.0f;
   float h2 = -2.0f * ttt + 3.0f * tt;
@@ -780,7 +827,7 @@ static inline quat hermite_quat(float t, quat p1, quat s1, quat _p2, quat s2) {
   quat result = HMM_AddQ(HMM_AddQ(HMM_MulQF(p1, h1), HMM_MulQF(p2, h2)),
                          HMM_AddQ(HMM_MulQF(s1, h3), HMM_MulQF(s2, h4)));
 
-  return result;
+  return HMM_NormQ(result);
 }
 
 #define frame_type(T)                                                          \
@@ -818,8 +865,8 @@ track_t track_new() {
       .interpolation = INTERP_CONSTANT,
   };
 }
-float track_start_time(const track_t *trk);
-float track_end_time(const track_t *trk);
+float track_start_time(const track_t *trk, FrameType ft);
+float track_end_time(const track_t *trk, FrameType ft);
 int track_frame_index(const track_t *trk, float time, bool looping,
                       FrameType ft);
 void track_sample(const track_t *trk, float time, bool looping, void *out,
@@ -836,13 +883,12 @@ void track_value_at_index(const track_t *trk, void *out, int idx, FrameType ft);
 float track_adjust_time_to_fit(const track_t *trk, float time, bool looping,
                                FrameType ft);
 
-float track_start_time(const track_t *trk) {
-  safecheckf(trk->frames.len > 0, "frame len is %d", trk->frames.len);
-  return frame_time(&trk->frames.ptr[0]);
+float track_start_time(const track_t *trk, FrameType ft) {
+  return track_time_at_index(trk, 0, ft);
 }
-float track_end_time(const track_t *trk) {
-  safecheckf(trk->frames.len > 0, "frame len is %d", trk->frames.len);
-  return frame_time(&trk->frames.ptr[trk->frames.len - 1]);
+
+float track_end_time(const track_t *trk, FrameType ft) {
+  return track_time_at_index(trk, trk->frames.len - 1, ft);
 }
 
 float track_adjust_time_to_fit(const track_t *trk, float time, bool looping,
@@ -927,18 +973,20 @@ float track_adjust_time_to_fit(const track_t *trk, float time, bool looping,
   }                                                                            \
   }
 
-inline float track_time_at_index(const track_t *trk, int idx, FrameType ft) {
+float track_time_at_index(const track_t *trk, int idx, FrameType ft) {
   switch_ft(
-      ft, { return frame_time(&trk->frames.ptr[idx]); },
-      { return frame_time(&trk->frames.ptr[idx]); },
-      { return frame_time(&trk->frames.ptr[idx]); })
+      ft, { return frame_time(slice_ref(scalar_frame_t, trk->frames, idx)); },
+      { return frame_time(slice_ref(vec3_frame_t, trk->frames, idx)); },
+      { return frame_time(slice_ref(quat_frame_t, trk->frames, idx)); });
 }
 
 inline void track_value_at_index(const track_t *trk, void *out, int idx,
                                  FrameType ft) {
-  switch_ft_set_out(ft, out, frame_value(scalar_frame_t, &trk->frames.ptr[idx]),
-                    frame_value(vec3_frame_t, &trk->frames.ptr[idx]),
-                    frame_value(quat_frame_t, &trk->frames.ptr[idx]));
+  switch_ft_set_out(
+      ft, out,
+      frame_value(scalar_frame_t, slice_ref(scalar_frame_t, trk->frames, idx)),
+      frame_value(vec3_frame_t, slice_ref(vec3_frame_t, trk->frames, idx)),
+      frame_value(quat_frame_t, slice_ref(quat_frame_t, trk->frames, idx)));
 }
 
 inline void track_default_sample(const track_t *trk, void *out, FrameType ft) {
@@ -953,13 +1001,13 @@ inline void track_sample(const track_t *trk, float time, bool looping,
     break;
   }
   case INTERP_LINEAR: {
-    track_sample_constant(trk, time, looping, out, ft);
-    // track_sample_linear(trk, time, looping, out, ft);
+    track_sample_linear(trk, time, looping, out, ft);
+    // track_sample_constant(trk, time, looping, out, ft);
     break;
   }
   case INTERP_CUBIC: {
-    // track_sample_cubic(trk, time, looping, out, ft);
-    track_sample_constant(trk, time, looping, out, ft);
+    track_sample_cubic(trk, time, looping, out, ft);
+    // track_sample_constant(trk, time, looping, out, ft);
     break;
   }
   }
@@ -968,7 +1016,7 @@ inline void track_sample(const track_t *trk, float time, bool looping,
 void track_sample_constant(const track_t *trk, float time, bool looping,
                            void *out, FrameType ft) {
   int frame = track_frame_index(trk, time, looping, ft);
-  if (frame < 0 || frame >= (int)trk->frames.len) {
+  if (frame < 0 || frame >= (int)(trk->frames.len - 1)) {
     track_default_sample(trk, out, ft);
     return;
   }
@@ -981,16 +1029,17 @@ void track_sample_constant(const track_t *trk, float time, bool looping,
 void track_sample_linear(const track_t *trk, float time, bool looping,
                          void *out, FrameType ft) {
   int frame = track_frame_index(trk, time, looping, ft);
-  if (frame < 0 || frame >= (int)trk->frames.len) {
+  if (frame < 0 || frame >= (int)(trk->frames.len - 1)) {
     track_default_sample(trk, out, ft);
     return;
   }
   int next_frame = frame + 1;
 
   float track_time = track_adjust_time_to_fit(trk, time, looping, ft);
-  float frame_delta = track_time_at_index(trk, next_frame, ft) -
-                      track_time_at_index(trk, frame, ft);
-  if (frame_delta <= 0.0f)
+  float end_time = track_time_at_index(trk, next_frame, ft);
+  float start_time = track_time_at_index(trk, frame, ft);
+  float frame_delta = end_time - start_time;
+  if (flte_zero(frame_delta))
     return track_default_sample(trk, out, ft);
 
   float t = (track_time - track_time_at_index(trk, frame, ft)) / frame_delta;
@@ -1005,6 +1054,9 @@ void track_sample_linear(const track_t *trk, float time, bool looping,
                             vec3 start, end;
                             track_value_at_index(trk, &start, frame, ft);
                             track_value_at_index(trk, &end, next_frame, ft);
+                            printf("(%d) Start: (%f, %f, %f)\n", frame, start.X,
+                                   start.Y, start.Z);
+                            printf("End: (%f, %f, %f)\n", end.X, end.Y, end.Z);
                             *x = interpolate_vec3(start, end, t);
                           }),
                           ({
@@ -1017,7 +1069,8 @@ void track_sample_linear(const track_t *trk, float time, bool looping,
 void track_sample_cubic(const track_t *trk, float time, bool looping, void *out,
                         FrameType ft) {
   int frame = track_frame_index(trk, time, looping, ft);
-  if (frame < 0 || frame >= (int)trk->frames.len) {
+  if (frame < 0 || frame >= (int)(trk->frames.len - 1)) {
+    printf("NO DELTA\n");
     track_default_sample(trk, out, ft);
     return;
   }
@@ -1026,36 +1079,49 @@ void track_sample_cubic(const track_t *trk, float time, bool looping, void *out,
   float track_time = track_adjust_time_to_fit(trk, time, looping, ft);
   float frame_delta = track_time_at_index(trk, next_frame, ft) -
                       track_time_at_index(trk, frame, ft);
-  if (frame_delta <= 0.0f)
+  if (flte_zero(frame_delta)) {
+    printf("NO DELTA\n");
     return track_default_sample(trk, out, ft);
+  }
 
   float t = (track_time - track_time_at_index(trk, frame, ft)) / frame_delta;
   switch_ft_set_out_block(
       ft, out, x,
       {
-        float point1 = frame_value(scalar_frame_t, &trk->frames.ptr[frame]);
-        float slope1 = frame_out(scalar_frame_t, &trk->frames.ptr[frame]);
-        float point2 =
-            frame_value(scalar_frame_t, &trk->frames.ptr[next_frame]);
-        float slope2 = frame_out(scalar_frame_t, &trk->frames.ptr[next_frame]);
+        float point1 = frame_value(
+            scalar_frame_t, slice_ref(scalar_frame_t, trk->frames, frame));
+        float slope1 = frame_out(scalar_frame_t,
+                                 slice_ref(scalar_frame_t, trk->frames, frame));
+        float point2 = frame_value(
+            scalar_frame_t, slice_ref(scalar_frame_t, trk->frames, next_frame));
+        float slope2 = frame_out(
+            scalar_frame_t, slice_ref(scalar_frame_t, trk->frames, next_frame));
         slope1 = slope1 * frame_delta;
         slope2 = slope2 * frame_delta;
         *x = hermite_scalar(t, point1, slope1, point2, slope2);
       },
       {
-        vec3 point1 = frame_value(vec3_frame_t, &trk->frames.ptr[frame]);
-        vec3 slope1 = frame_out(vec3_frame_t, &trk->frames.ptr[frame]);
-        vec3 point2 = frame_value(vec3_frame_t, &trk->frames.ptr[next_frame]);
-        vec3 slope2 = frame_out(vec3_frame_t, &trk->frames.ptr[next_frame]);
+        vec3 point1 = frame_value(vec3_frame_t,
+                                  slice_ref(vec3_frame_t, trk->frames, frame));
+        vec3 slope1 = frame_out(vec3_frame_t,
+                                slice_ref(vec3_frame_t, trk->frames, frame));
+        vec3 point2 = frame_value(
+            vec3_frame_t, slice_ref(vec3_frame_t, trk->frames, next_frame));
+        vec3 slope2 = frame_out(
+            vec3_frame_t, slice_ref(vec3_frame_t, trk->frames, next_frame));
         slope1 = HMM_MulV3F(slope1, frame_delta);
         slope2 = HMM_MulV3F(slope2, frame_delta);
         *x = hermite_vec3(t, point1, slope1, point2, slope2);
       },
       {
-        quat point1 = frame_value(quat_frame_t, &trk->frames.ptr[frame]);
-        quat slope1 = frame_out(quat_frame_t, &trk->frames.ptr[frame]);
-        quat point2 = frame_value(quat_frame_t, &trk->frames.ptr[frame]);
-        quat slope2 = frame_out(quat_frame_t, &trk->frames.ptr[frame]);
+        quat point1 = frame_value(quat_frame_t,
+                                  slice_ref(quat_frame_t, trk->frames, frame));
+        quat slope1 = frame_out(quat_frame_t,
+                                slice_ref(quat_frame_t, trk->frames, frame));
+        quat point2 = frame_value(
+            quat_frame_t, slice_ref(quat_frame_t, trk->frames, next_frame));
+        quat slope2 = frame_out(
+            quat_frame_t, slice_ref(quat_frame_t, trk->frames, next_frame));
         slope1 = HMM_MulQF(slope1, frame_delta);
         slope2 = HMM_MulQF(slope2, frame_delta);
         *x = hermite_quat(t, point1, slope1, point2, slope2);
@@ -1114,7 +1180,7 @@ void track_from_cgltf_channel(track_t *result,
   floatarray_t value_floats = array_empty(floatarray_t);
 
   u8 component_count = frame_type_float_count(ft);
-  cgltf_get_scalar_values(&timeline_floats, component_count, sampler->input);
+  cgltf_get_scalar_values(&timeline_floats, 1, sampler->input);
   cgltf_get_scalar_values(&value_floats, component_count, sampler->output);
 
   u32 num_frames = (u32)sampler->input->count;
@@ -1131,8 +1197,9 @@ void track_from_cgltf_channel(track_t *result,
 
   for (u32 i = 0; i < num_frames; i++) {
     int base_index = i * num_values_per_frame;
+    int frame_index = i * frame_size;
     float *value_ptr = &value_floats.ptr[base_index];
-    u8 *frame = &result->frames.ptr[i];
+    u8 *frame = &result->frames.ptr[frame_index];
 
     frame_set_time(frame, timeline_floats.ptr[i]);
 
@@ -1161,7 +1228,9 @@ void track_from_cgltf_channel(track_t *result,
                  sizeof(float) * component_count);
         });
 
-    value_ptr += component_count;
+    if (is_sampler_cubic) {
+      value_ptr += component_count;
+    }
 
     switch_ft(
         ft,
@@ -1172,6 +1241,8 @@ void track_from_cgltf_channel(track_t *result,
         {
           memcpy(&cast_ptr(vec3_frame_t, frame)->value, value_ptr,
                  sizeof(float) * component_count);
+
+          vec3 value = frame_value(vec3_frame_t, frame);
         },
         {
           memcpy(&cast_ptr(quat_frame_t, frame)->value, value_ptr,
@@ -1223,12 +1294,12 @@ float transform_track_start_time(const TransformTrack *trk) {
   bool is_set = false;
 
   if (trk->position.frames.len > 1) {
-    result = track_start_time(&trk->position);
+    result = track_start_time(&trk->position, FRAME_VEC3);
     is_set = true;
   }
 
   if (trk->rotation.frames.len > 1) {
-    float start = track_start_time(&trk->rotation);
+    float start = track_start_time(&trk->rotation, FRAME_QUAT);
     if (start < result || !is_set) {
       is_set = true;
       result = start;
@@ -1236,7 +1307,7 @@ float transform_track_start_time(const TransformTrack *trk) {
   }
 
   if (trk->scale.frames.len > 1) {
-    float start = track_start_time(&trk->scale);
+    float start = track_start_time(&trk->scale, FRAME_VEC3);
     if (start < result || !is_set) {
       is_set = true;
       result = start;
@@ -1251,12 +1322,12 @@ float transform_track_end_time(const TransformTrack *trk) {
   bool is_set = false;
 
   if (trk->position.frames.len > 1) {
-    result = track_end_time(&trk->rotation);
+    result = track_end_time(&trk->position, FRAME_VEC3);
     is_set = true;
   }
 
   if (trk->rotation.frames.len > 1) {
-    float start = track_end_time(&trk->rotation);
+    float start = track_end_time(&trk->rotation, FRAME_QUAT);
     if (start > result || !is_set) {
       is_set = true;
       result = start;
@@ -1264,7 +1335,7 @@ float transform_track_end_time(const TransformTrack *trk) {
   }
 
   if (trk->scale.frames.len > 1) {
-    float start = track_end_time(&trk->scale);
+    float start = track_end_time(&trk->scale, FRAME_VEC3);
     if (start > result || !is_set) {
       is_set = true;
       result = start;
@@ -1287,12 +1358,15 @@ Transform transform_track_sample(const TransformTrack *trk,
   Transform result = *ref;
   // only assign if animated
   if (trk->position.frames.len > 1) {
+    printf("ANIMATED POS\n");
     track_sample(&trk->position, time, looping, &result.position, FRAME_VEC3);
   }
   if (trk->rotation.frames.len > 1) {
+    printf("ANIMATED ROT\n");
     track_sample(&trk->rotation, time, looping, &result.rotation, FRAME_QUAT);
   }
   if (trk->scale.frames.len > 1) {
+    printf("ANIMATED SCL\n");
     track_sample(&trk->scale, time, looping, &result.scale, FRAME_VEC3);
   }
   return result;
@@ -1892,6 +1966,9 @@ float clip_duration(const Clip *clip) {
 }
 
 void clip_recalculate_duration(Clip *clip) {
+  if (strcmp(clip->name, "Running")) {
+    printf("\n");
+  }
   clip->start_time = 0;
   clip->end_time = 0;
   bool start_set = false;
@@ -1905,14 +1982,16 @@ void clip_recalculate_duration(Clip *clip) {
       float start_time = transform_track_start_time(trk);
       float end_time = transform_track_end_time(trk);
 
-      printf("START: %f END: %f\n", start_time, end_time);
+      if (strcmp(clip->name, "Running")) {
+        printf("START: %f END: %f\n", start_time, end_time);
+      }
 
       if (start_time < clip->start_time || !start_set) {
         clip->start_time = start_time;
         start_set = true;
       }
 
-      if (start_time > clip->end_time || !end_set) {
+      if (end_time > clip->end_time || !end_set) {
         clip->end_time = end_time;
         end_set = true;
       }
@@ -1932,23 +2011,52 @@ TransformTrack *clip_transform_track_at(Clip *clip, u32 joint_idx) {
 }
 
 float clip_sample(const Clip *clip, Pose *out_pose, float time) {
+#define TR_PRINT_PANIC
+  // #define TR_PRINT_DEFAULT
+  printf("SYSTIME: %f\n", time);
   if (float_eq(clip_duration(clip), 0.0)) {
     return 0.0f;
   }
   time = clip_adjust_time_to_fit_range(clip, time);
+  printf("ADJUSTED TIME: %f\n", time);
 
   u32 len = clip->tracks.len;
   for (u32 i = 0; i < len; i++) {
     const TransformTrack *ttrk = &clip->tracks.ptr[i];
     u32 joint = ttrk->id;
+    printf("ANIMATING: %s\n", JOINT_NAMES[joint]);
+    if (strcmp(JOINT_NAMES[joint], "Hips") == 0) {
+      printf("ON THE HIPS!\n");
+    }
+    // left handed:
+    // anim = matToLeft*matAnim*matToRight
     Transform local = pose_get_local_transform(out_pose, joint);
-    if (transform_print(&local)) {
+    // right handed:
+    // matAnimLeftHanded = matToRight*matToLeft*matAnim*matToRight
+    transform_maybe_flip_hand(&local);
+    if (transform_print(&local, "name", true)) {
+#ifdef TR_PRINT_PANIC
       safecheck(false);
+#endif
     }
     Transform animated =
         transform_track_sample(ttrk, &local, time, clip->looping);
+    if (transform_print(&animated, "animated1", true)) {
+#ifdef TR_PRINT_PANIC
+      safecheck(false);
+#endif
+    }
+    // left handed:
+    // matAnimLeftHanded = matToRight*matToLeft*matAnim*matToRight
+    transform_maybe_flip_hand(&animated);
+    if (transform_print(&animated, "animated2", false)) {
+#ifdef TR_PRINT_PANIC
+      safecheck(false);
+#endif
+    }
     // transform_print(&animated);
     out_pose->joints[joint] = animated;
+    printf("DONE ANIMATING\n\n\n");
   }
 
   return time;
@@ -2157,13 +2265,15 @@ void init(void) {
       .cap = state.sk.joints_len,
   };
 
+  JOINT_NAMES = state.sk.joint_names;
+
   printf("CLIPS: %zu\n", state.clips.len);
   for (u32 i = 0; i < state.clips.len; i++) {
     const Clip *clip = &state.clips.ptr[i];
     if (clip->name == NULL)
       continue;
     printf("NAME: %s\n", clip->name);
-    if (strcmp(clip->name, "Walking") == 0) {
+    if (strcmp(clip->name, "Running") == 0) {
       printf("FOUND: %s\n", clip->name);
       state.animation.clip_idx = i;
     }
@@ -2328,12 +2438,13 @@ void frame(void) {
   //                            (HMM_Vec3){.X = 0.0f, .Y = 1.0f, .Z =
   //                            0.0f});
 
+  safecheck(state.animation.clip_idx == 0);
   state.animation.t = clip_sample(&state.clips.ptr[state.animation.clip_idx],
                                   &state.animation.animated_pose,
                                   state.animation.t + (float)delta_time);
 
-  // printf("animt %f delta_time %f last_time %llu\n", state.animation.t,
-  //        (float)delta_time, last_time);
+  printf("animt %f delta_time %f last_time %llu\n", state.animation.t,
+         (float)delta_time, last_time);
 
   pose_get_matrix_palette(&state.animation.animated_pose,
                           &state.animation.pose_palette);
@@ -2353,8 +2464,8 @@ void frame(void) {
 
   state.ry += 1.0f * t;
   state.rx += 1.0f * t;
-  HMM_Mat4 rym = HMM_Rotate(state.ry, (HMM_Vec3){{0.0f, 1.0f, 0.0f}});
-  // HMM_Mat4 rym = HMM_M4D(1.0);
+  // HMM_Mat4 rym = HMM_Rotate(state.ry, (HMM_Vec3){{0.0f, 1.0f, 0.0f}});
+  HMM_Mat4 rym = HMM_M4D(1.0);
 
   HMM_Mat4 rxm = HMM_Rotate(state.rx, (HMM_Vec3){{1.0f, 0.0f, 0.0f}});
   HMM_Mat4 model =
