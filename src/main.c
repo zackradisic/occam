@@ -30,6 +30,22 @@
 #include <cgltf.h>
 #include "array.h"
 
+#ifdef DEBUG
+#define _CRT_SECURE_NO_WARNINGS (1)
+// include nuklear.h before the sokol_nuklear.h implementation
+#define NK_IMPLEMENTATION
+#define NK_INCLUDE_FIXED_TYPES
+#define NK_INCLUDE_STANDARD_IO
+#define NK_INCLUDE_DEFAULT_ALLOCATOR
+#define NK_INCLUDE_VERTEX_BUFFER_OUTPUT
+#define NK_INCLUDE_FONT_BAKING
+#define NK_INCLUDE_DEFAULT_FONT
+#define NK_INCLUDE_STANDARD_VARARGS
+#include <nuklear.h>
+#define SOKOL_NUKLEAR_IMPL
+#include <sokol/util/sokol_nuklear.h>
+#endif // DEBUG
+
 #if defined(SOKOL_GLCORE33) || defined(SOKOL_GLES2) || defined(SOKOL_GLES3)
 #define USING_OPENGL_BACKEND
 #else
@@ -2402,10 +2418,24 @@ void init(void) {
 
   set_vs_params();
   stm_setup();
+
+  // use sokol-nuklear with all default-options (we're not doing
+  // multi-sampled rendering or using non-default pixel formats)
+  snk_setup(&(snk_desc_t){
+      .dpi_scale = sapp_dpi_scale(),
+      .logger.func = slog_func,
+  });
 }
+
+#ifdef DEBUG
+static int draw_debug_gui(struct nk_context *ctx);
+#endif
 
 static u64 last_time = 0;
 void frame(void) {
+  struct nk_context *ctx = snk_new_frame();
+  draw_debug_gui(ctx);
+
   const float w = sapp_widthf();
   const float h = sapp_heightf();
 
@@ -2474,12 +2504,12 @@ void frame(void) {
   state.vs_params.view = view;
   state.vs_params.projection = proj;
 
-  // sg_pass_action pass_action = {
-  //     .colors[0] = {.load_action = SG_LOADACTION_CLEAR,
-  //                   .clear_value = {0.25f, 0.5f, 0.75f, 1.0f}}};
   sg_pass_action pass_action = {
       .colors[0] = {.load_action = SG_LOADACTION_CLEAR,
-                    .clear_value = {0.0, 0.0, 0.0, 1.0f}}};
+                    .clear_value = {0.25f, 0.5f, 0.75f, 1.0f}}};
+  // sg_pass_action pass_action = {
+  //     .colors[0] = {.load_action = SG_LOADACTION_CLEAR,
+  //                   .clear_value = {0.0, 0.0, 0.0, 1.0f}}};
   sg_begin_default_pass(&pass_action, (int)w, (int)h);
   sg_apply_pipeline(state.pip);
   sg_apply_bindings(&state.bind);
@@ -2487,11 +2517,15 @@ void frame(void) {
                     &SG_RANGE(state.vs_params));
   sg_apply_uniforms(SG_SHADERSTAGE_FS, SLOT_fs_params, &SG_RANGE(fs_params));
   sg_draw(0, state.bm.indices.len, 1);
+  snk_render(sapp_width(), sapp_height());
+
   sg_end_pass();
   sg_commit();
 }
 
 void cleanup(void) { sg_shutdown(); }
+
+void input(const sapp_event *event) { snk_handle_event(event); }
 
 sapp_desc sokol_main(int argc, char *argv[]) {
   (void)argc;
@@ -2514,6 +2548,7 @@ sapp_desc sokol_main(int argc, char *argv[]) {
   return (sapp_desc){
       .init_cb = init,
       .frame_cb = frame,
+      .event_cb = input,
       .cleanup_cb = cleanup,
       // .event_cb = __dbgui_event,
       .width = 800,
@@ -2524,5 +2559,25 @@ sapp_desc sokol_main(int argc, char *argv[]) {
       .logger.func = slog_func,
   };
 }
+
+#ifdef DEBUG
+static int draw_debug_gui(struct nk_context *ctx) {
+  enum Animation { IDLE, WALK, RUN, JUMP };
+  static enum Animation current_animation = IDLE;
+  if (nk_begin(ctx, "Animation Selector", nk_rect(50, 50, 220, 220),
+               NK_WINDOW_BORDER | NK_WINDOW_MOVABLE | NK_WINDOW_CLOSABLE)) {
+    static const char *animations[] = {"Idle", "Walk", "Run", "Jump"};
+
+    nk_layout_row_static(ctx, 30, 200, 1);
+    if (nk_combo(ctx, animations, 4, current_animation, 25,
+                 nk_vec2(200, 200))) {
+      // Update your model animation here based on current_animation
+    }
+  }
+
+  nk_end(ctx);
+  return 1;
+}
+#endif
 
 ASSUME_NONNULL_END
