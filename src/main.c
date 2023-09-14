@@ -35,6 +35,7 @@
 // include nuklear.h before the sokol_nuklear.h implementation
 #define NK_IMPLEMENTATION
 #define NK_INCLUDE_FIXED_TYPES
+#define NK_INCLUDE_STANDARD_BOOL
 #define NK_INCLUDE_STANDARD_IO
 #define NK_INCLUDE_DEFAULT_ALLOCATOR
 #define NK_INCLUDE_VERTEX_BUFFER_OUTPUT
@@ -120,6 +121,8 @@ typedef array_type(mat4) mat4array_t;
 typedef array_type(float) floatarray_t;
 typedef array_type(u32) u32array_t;
 
+typedef array_type(const char *) strarray_t;
+
 static char **JOINT_NAMES = NULL;
 
 int cgltf_get_node_index(cgltf_node *target, cgltf_node *nodes, u32 nodes_len);
@@ -133,12 +136,6 @@ const mat4 OPENGL_TO_METAL_MATRIX = (mat4){
                  {0.0f, 0.0f, 0.5f, 0.0f},
                  {0.0f, 0.0f, 0.5f, 1.0f}},
 };
-
-typedef struct {
-  char **_Nullable ptr;
-  usize len;
-  usize cap;
-} strarray_t;
 
 typedef struct {
   vec3 pos;
@@ -2122,6 +2119,13 @@ typedef struct {
   Transform model;
 } AnimationInstance;
 
+#ifdef DEBUG
+typedef struct {
+  strarray_t animations;
+  usize selected_animation;
+} DebugGui;
+#endif
+
 static struct {
   float rx, ry;
   sg_pipeline pip;
@@ -2134,6 +2138,9 @@ static struct {
   mat4array_t inv_bind_pose;
   vs_params_t vs_params;
   AnimationInstance animation;
+#ifdef DEBUG
+  DebugGui gui;
+#endif
 } state;
 
 void set_vs_params() {
@@ -2200,6 +2207,7 @@ void cgltf_load_data(cgltf_data **data, cgltf_options *opts, const char *path) {
 }
 
 void init(void) {
+  ZERO(state);
   sg_setup(&(sg_desc){
       .context = sapp_sgcontext(),
       .logger.func = slog_func,
@@ -2211,16 +2219,20 @@ void init(void) {
   // const char *path = "./src/assets/Woman.gltf";
   // const char *path = "./src/assets/scene.gltf";
   // const char *path = "./src/assets/simple_skin.gltf";
-  // const char *path = "./src/assets/vanguard.glb";
-  const char *path = "./src/assets/stacy.glb";
+  const char *path = "./src/assets/vanguard.glb";
+  // const char *path = "./src/assets/stacy.glb";
+  // const char *path = "./src/assets/master_chief/scene.gltf";
+  // const char *path = "./src/assets/low_poly_crystal_pangolin/scene.gltf";
   cgltf_load_data(&model_data, &opts, path);
+
+  printf("TEXTURES: %zu\n", model_data->textures_count);
 
   cgltf_data *anim_data = NULL;
   cgltf_options opts2 = {};
   ZERO(opts2);
   // const char *anim_path = "./src/assets/vanguard@bellydance.glb";
-  const char *anim_path = "./src/assets/vanguard@goofyrunning.glb";
-  cgltf_load_data(&anim_data, &opts2, anim_path);
+  // const char *anim_path = "./src/assets/vanguard@goofyrunning.glb";
+  // cgltf_load_data(&anim_data, &opts2, anim_path);
 
   // cgltf_free(model_data);
 
@@ -2231,13 +2243,8 @@ void init(void) {
   };
 
   state.clips = clip_load_animations_from_cgltf(model_data);
-  clip_array_t anim_clips = clip_load_animations_from_cgltf(anim_data);
-  // static_assert(__same_type(__typeof__(&state.clips),
-  // __typeof__(&anim_clips)),
-  //               "");
-  // _array_concat((array_t *)(&state.clips), (const array_t *)(&anim_clips),
-  //               sizeof(Clip));
-  array_concat(Clip, &state.clips, &anim_clips);
+  // clip_array_t anim_clips = clip_load_animations_from_cgltf(anim_data);
+  // array_concat(Clip, &state.clips, &anim_clips);
 
   bonemesh_array_t meshes = bonemesh_load_meshes(model_data);
   state.bm = meshes.ptr[0];
@@ -2247,7 +2254,6 @@ void init(void) {
   state.animation.pose_palette = array_empty(mat4array_t);
   array_reserve(mat4, &state.animation.pose_palette, state.sk.rest_pose.len);
 
-  printf("JOINTS LEN: %d\n", state.sk.rest_pose.len);
   state.pose_palette = array_empty(mat4array_t);
   state.inv_bind_pose = (mat4array_t){
       .ptr = state.sk.inv_bind_pose,
@@ -2257,7 +2263,7 @@ void init(void) {
 
   JOINT_NAMES = state.sk.joint_names;
 
-  u32 default_clip_index = 1;
+  u32 default_clip_index = 0;
   state.animation.clip_idx = default_clip_index;
 
   printf("CLIPS: %zu\n", state.clips.len);
@@ -2275,9 +2281,17 @@ void init(void) {
   array_ref(Clip, &state.clips, default_clip_index)->looping = true;
   Clip *clip = &state.clips.ptr[state.animation.clip_idx];
   printf("Selected clip: %s\n", clip->name);
-  printf("CLIP TRACKS: %zu\n", clip->tracks.len);
-  for (u32 i = 0; i < clip->tracks.len; i++) {
+
+#ifdef DEBUG
+  strarray_t names = array_empty(strarray_t);
+  array_reserve(const char *, &names, state.clips.len);
+
+  for (usize i = 0; i < state.clips.len; i++) {
+    array_push(const char *, &names, state.clips.ptr[i].name);
   }
+  state.gui.animations = names;
+  state.gui.selected_animation = default_clip_index;
+#endif
 
 #ifdef CPU_SKIN
   bonemesh_cpu_skin(&state.bm, &state.sk, &state.animated_pose);
@@ -2504,12 +2518,12 @@ void frame(void) {
   state.vs_params.view = view;
   state.vs_params.projection = proj;
 
-  sg_pass_action pass_action = {
-      .colors[0] = {.load_action = SG_LOADACTION_CLEAR,
-                    .clear_value = {0.25f, 0.5f, 0.75f, 1.0f}}};
   // sg_pass_action pass_action = {
   //     .colors[0] = {.load_action = SG_LOADACTION_CLEAR,
-  //                   .clear_value = {0.0, 0.0, 0.0, 1.0f}}};
+  //                   .clear_value = {0.25f, 0.5f, 0.75f, 1.0f}}};
+  sg_pass_action pass_action = {
+      .colors[0] = {.load_action = SG_LOADACTION_CLEAR,
+                    .clear_value = {0.0, 0.0, 0.0, 1.0f}}};
   sg_begin_default_pass(&pass_action, (int)w, (int)h);
   sg_apply_pipeline(state.pip);
   sg_apply_bindings(&state.bind);
@@ -2562,16 +2576,20 @@ sapp_desc sokol_main(int argc, char *argv[]) {
 
 #ifdef DEBUG
 static int draw_debug_gui(struct nk_context *ctx) {
-  enum Animation { IDLE, WALK, RUN, JUMP };
-  static enum Animation current_animation = IDLE;
   if (nk_begin(ctx, "Animation Selector", nk_rect(50, 50, 220, 220),
                NK_WINDOW_BORDER | NK_WINDOW_MOVABLE | NK_WINDOW_CLOSABLE)) {
-    static const char *animations[] = {"Idle", "Walk", "Run", "Jump"};
 
     nk_layout_row_static(ctx, 30, 200, 1);
-    if (nk_combo(ctx, animations, 4, current_animation, 25,
-                 nk_vec2(200, 200))) {
-      // Update your model animation here based on current_animation
+    if (nk_checkbox_label(ctx, "Disable loop",
+                          &state.clips.ptr[state.animation.clip_idx].looping)) {
+      state.animation.t = 0.0;
+    }
+    int selected_animation =
+        nk_combo(ctx, state.gui.animations.ptr, state.gui.animations.len,
+                 state.animation.clip_idx, 25, nk_vec2(200, 200));
+    if ((u32)selected_animation != state.animation.clip_idx) {
+      state.animation.t = 0.0;
+      state.animation.clip_idx = selected_animation;
     }
   }
 
