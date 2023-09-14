@@ -2,7 +2,6 @@
 #define HANDMADE_MATH_NO_SSE
 #define HANDMADE_MATH_USE_DEGREES
 #define STB_IMAGE_IMPLEMENTATION
-#define STBI_ONLY_JPEG
 
 #define DEBUG 1
 
@@ -126,6 +125,8 @@ typedef array_type(const char *) strarray_t;
 static char **JOINT_NAMES = NULL;
 
 int cgltf_get_node_index(cgltf_node *target, cgltf_node *nodes, u32 nodes_len);
+int cgltf_get_node_index_by_name(const char *name, cgltf_node *nodes,
+                                 cgltf_size nodes_len);
 void cgltf_get_scalar_values(floatarray_t *out, u32 comp_count,
                              const cgltf_accessor *in_accessor);
 char **cgltf_load_joint_names(cgltf_data *data);
@@ -1851,6 +1852,10 @@ bonemesh_array_t bonemesh_load_meshes(cgltf_data *data) {
         safecheck(mesh.indices.len == index_count);
       }
 
+      // if (primitive->material && prVjjimitive->material) {
+      //   primitive->material->co
+      // }
+
       array_push(BoneMesh, &result, mesh);
     }
   }
@@ -1951,6 +1956,50 @@ clip_array_t clip_load_animations_from_cgltf(cgltf_data *data) {
   }
 
   return result;
+}
+
+void clip_load_additional_animations_from_cgltf(cgltf_data *data,
+                                                const char *name,
+                                                clip_array_t *clips,
+                                                cgltf_node *model_nodes,
+                                                cgltf_size model_node_count) {
+  u32 num_clips = data->animations_count;
+  u32 num_nodes = data->nodes_count;
+
+  u32 start = clips->len;
+  array_reserve(Clip, clips, num_clips);
+  clips->len += num_clips;
+
+  for (u32 i = 0; i < num_clips; i++) {
+    Clip *clip = &clips->ptr[start + i];
+    *clip = clip_new();
+    cgltf_animation *anim = &data->animations[i];
+    clip->name = anim->name;
+    clip->name = name;
+    printf("ANIM NAME: %s\n", clip->name);
+    u32 num_channels = (u32)anim->channels_count;
+    array_reserve(TransformTrack, &clip->tracks, num_channels);
+
+    for (u32 j = 0; j < num_channels; ++j) {
+      cgltf_animation_channel *channel = &anim->channels[j];
+      cgltf_node *target = channel->target_node;
+
+      int node_id = cgltf_get_node_index_by_name(target->name, model_nodes,
+                                                 model_node_count);
+      TransformTrack *trk = clip_transform_track_at(clip, node_id);
+
+      if (channel->target_path == cgltf_animation_path_type_translation) {
+        track_from_cgltf_channel(&trk->position, channel, FRAME_VEC3);
+      } else if (channel->target_path == cgltf_animation_path_type_scale) {
+        track_from_cgltf_channel(&trk->scale, channel, FRAME_VEC3);
+      } else if (channel->target_path == cgltf_animation_path_type_rotation) {
+        track_from_cgltf_channel(&trk->rotation, channel, FRAME_QUAT);
+      }
+    }
+
+    // clip->tracks.len = num_channels;
+    clip_recalculate_duration(clip);
+  }
 }
 
 float clip_duration(const Clip *clip) {
@@ -2079,6 +2128,18 @@ int cgltf_get_node_index(cgltf_node *target, cgltf_node *nodes, u32 nodes_len) {
 
   for (u32 i = 0; i < nodes_len; i++) {
     if (target == &nodes[i])
+      return (int)i;
+  }
+
+  return -1;
+}
+
+int cgltf_get_node_index_by_name(const char *name, cgltf_node *nodes,
+                                 cgltf_size nodes_len) {
+  safecheck(name != NULL);
+
+  for (u32 i = 0; i < nodes_len; i++) {
+    if (strcmp(name, nodes[i].name) == 0)
       return (int)i;
   }
 
@@ -2231,8 +2292,8 @@ void init(void) {
   cgltf_options opts2 = {};
   ZERO(opts2);
   // const char *anim_path = "./src/assets/vanguard@bellydance.glb";
-  // const char *anim_path = "./src/assets/vanguard@goofyrunning.glb";
-  // cgltf_load_data(&anim_data, &opts2, anim_path);
+  char *anim_path = "./src/assets/vanguard@goofyrunning.glb";
+  cgltf_load_data(&anim_data, &opts2, anim_path);
 
   // cgltf_free(model_data);
 
@@ -2243,6 +2304,15 @@ void init(void) {
   };
 
   state.clips = clip_load_animations_from_cgltf(model_data);
+  clip_load_additional_animations_from_cgltf(anim_data, "goofyrunning",
+                                             &state.clips, model_data->nodes,
+                                             model_data->nodes_count);
+  anim_path = "./src/assets/vanguard@bellydance.glb";
+  cgltf_load_data(&anim_data, &opts2, anim_path);
+  clip_load_additional_animations_from_cgltf(anim_data, "bellydance",
+                                             &state.clips, model_data->nodes,
+                                             model_data->nodes_count);
+
   // clip_array_t anim_clips = clip_load_animations_from_cgltf(anim_data);
   // array_concat(Clip, &state.clips, &anim_clips);
 
@@ -2269,9 +2339,9 @@ void init(void) {
   printf("CLIPS: %zu\n", state.clips.len);
   for (u32 i = 0; i < state.clips.len; i++) {
     Clip *clip = &state.clips.ptr[i];
+    clip->looping = true;
     if (clip->name == NULL)
       continue;
-    printf("NAME: %s\n", clip->name);
     if (strcmp(clip->name, "swingdance") == 0) {
       state.animation.clip_idx = i;
       clip->looping = true;
@@ -2287,7 +2357,12 @@ void init(void) {
   array_reserve(const char *, &names, state.clips.len);
 
   for (usize i = 0; i < state.clips.len; i++) {
-    array_push(const char *, &names, state.clips.ptr[i].name);
+    printf("NAME: %s\n", state.clips.ptr[i].name);
+    if (state.clips.ptr[i].name == NULL) {
+      array_push(const char *, &names, (const char *)"NULL");
+    } else {
+      array_push(const char *, &names, state.clips.ptr[i].name);
+    }
   }
   state.gui.animations = names;
   state.gui.selected_animation = default_clip_index;
@@ -2403,8 +2478,11 @@ void init(void) {
 
   int width, height, channels;
   // stbi_set_flip_vertically_on_load(1);
+  // u8 *rgba_image =
+  //     stbi_load("./src/assets/stacy.jpeg", &width, &height, &channels, 4);
   u8 *rgba_image =
-      stbi_load("./src/assets/stacy.jpeg", &width, &height, &channels, 4);
+      stbi_load("./src/assets/vanguard.png", &width, &height, &channels, 4);
+  safecheck(rgba_image != NULL);
   printf("CHANNELS: %d\n", channels);
 
   // Allocate a new buffer for RGBA data
@@ -2507,23 +2585,24 @@ void frame(void) {
 
   state.ry += 1.0f * t;
   state.rx += 1.0f * t;
-  HMM_Mat4 rym = HMM_Rotate(state.ry, (HMM_Vec3){{0.0f, 1.0f, 0.0f}});
-  // HMM_Mat4 rym = HMM_M4D(1.0);
+  // HMM_Mat4 rym = HMM_Rotate(state.ry, (HMM_Vec3){{0.0f, 1.0f, 0.0f}});
+  HMM_Mat4 rym = HMM_M4D(1.0);
 
   HMM_Mat4 rxm = HMM_Rotate(state.rx, (HMM_Vec3){{1.0f, 0.0f, 0.0f}});
-  HMM_Mat4 model = HMM_MulM4(HMM_Translate(HMM_V3(0.0, -0.5, ZPOS)),
-                             HMM_MulM4(rym, HMM_Scale(HMM_V3(0.5, 0.5, .5))));
+  HMM_Mat4 model =
+      HMM_MulM4(HMM_Translate(HMM_V3(0.0, -0.5, ZPOS)),
+                HMM_MulM4(rym, HMM_Scale(HMM_V3(0.75, 0.75, .75))));
 
   state.vs_params.model = model;
   state.vs_params.view = view;
   state.vs_params.projection = proj;
 
-  // sg_pass_action pass_action = {
-  //     .colors[0] = {.load_action = SG_LOADACTION_CLEAR,
-  //                   .clear_value = {0.25f, 0.5f, 0.75f, 1.0f}}};
   sg_pass_action pass_action = {
       .colors[0] = {.load_action = SG_LOADACTION_CLEAR,
-                    .clear_value = {0.0, 0.0, 0.0, 1.0f}}};
+                    .clear_value = {0.25f, 0.5f, 0.75f, 1.0f}}};
+  // sg_pass_action pass_action = {
+  //     .colors[0] = {.load_action = SG_LOADACTION_CLEAR,
+  //                   .clear_value = {0.0, 0.0, 0.0, 1.0f}}};
   sg_begin_default_pass(&pass_action, (int)w, (int)h);
   sg_apply_pipeline(state.pip);
   sg_apply_bindings(&state.bind);
