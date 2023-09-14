@@ -1,6 +1,8 @@
 // For wasm i think turn off?
 #define HANDMADE_MATH_NO_SSE
 #define HANDMADE_MATH_USE_DEGREES
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_JPEG
 
 #define DEBUG 1
 
@@ -11,6 +13,8 @@
 #include "common.h"
 #include <sokol/sokol_glue.h>
 #include "sokol.h"
+
+#include <stb_image.h>
 
 #ifdef CPU_SKIN
 #include "shaders/bonemesh_cpu.glsl.h"
@@ -367,24 +371,24 @@ quat quat_look_rotation(vec3 dir, vec3 up) {
   return result;
 }
 mat4 quat_to_mat4(quat q) {
-#ifdef LEFT_HANDED
-  return (mat4){
-      .Elements = {
-          {1 - 2 * q.Y * q.Y - 2 * q.Z * q.Z, 2 * q.X * q.Y + 2 * q.W * q.Z,
-           2 * q.X * q.Z - 2 * q.W * q.Y, 0},
-          {2 * q.X * q.Y - 2 * q.W * q.Z, 1 - 2 * q.X * q.X - 2 * q.Z * q.Z,
-           2 * q.Y * q.Z + 2 * q.W * q.X, 0},
-          {2 * q.X * q.Z + 2 * q.W * q.Y, 2 * q.Y * q.Z - 2 * q.W * q.X,
-           1 - 2 * q.X * q.X - 2 * q.Y * q.Y, 0},
-          {0, 0, 0, 1}}};
-#else
+  // For some reason this causes a flickering bug on metal, but it's not
+  // necessary, but leaving it here #ifdef LEFT_HANDED return (mat4){
+  //     .Elements = {
+  //         {1 - 2 * q.Y * q.Y - 2 * q.Z * q.Z, 2 * q.X * q.Y + 2 * q.W * q.Z,
+  //          2 * q.X * q.Z - 2 * q.W * q.Y, 0},
+  //         {2 * q.X * q.Y - 2 * q.W * q.Z, 1 - 2 * q.X * q.X - 2 * q.Z * q.Z,
+  //          2 * q.Y * q.Z + 2 * q.W * q.X, 0},
+  //         {2 * q.X * q.Z + 2 * q.W * q.Y, 2 * q.Y * q.Z - 2 * q.W * q.X,
+  //          1 - 2 * q.X * q.X - 2 * q.Y * q.Y, 0},
+  //         {0, 0, 0, 1}}};
+  // #else
   vec3 r = quat_mul_v3(q, HMM_V3(1, 0, 0));
   vec3 u = quat_mul_v3(q, HMM_V3(0, 1, 0));
   vec3 f = quat_mul_v3(q, HMM_V3(0, 0, 1));
 
   return mat4_new(r.X, r.Y, r.Z, 0, u.X, u.Y, u.Z, 0, f.X, f.Y, f.Z, 0, 0, 0, 0,
                   1);
-#endif
+  // #endif
 }
 quat quat_from_mat4_rh(mat4 m) {
   vec3 up = HMM_NormV3(HMM_V3(m.Columns[1].X, m.Columns[1].Y, m.Columns[1].Z));
@@ -530,17 +534,6 @@ Transform cgltf_get_local_transform(cgltf_node *n);
 // This function should be called whenever we create a transform from glTF
 // values, this is because glTF uses a right handed coordinate system.
 void transform_convert_handedness(Transform *t);
-
-void transform_maybe_flip_hand(Transform *t) {
-#ifdef LEFT_HANDED
-  mat4 m = quat_to_mat4(t->rotation);
-  m = HMM_MulM4(MAT4_CONVERT_HAND, m);
-
-  t->rotation = quat_from_mat4_rh(m);
-  t->position.Z *= -1;
-#else
-#endif
-}
 
 void transform_convert_handedness(Transform *t) {
 #ifdef LEFT_HANDED
@@ -1596,7 +1589,6 @@ typedef struct {
   vec2 *texcoords;
   vec3 *norms;
   vec4 *weights;
-  // ivec4 *influences;
   u8vec4 *influences;
   vec3 *skinned_positions;
   vec3 *skinned_normals;
@@ -1906,6 +1898,9 @@ float clip_adjust_time_to_fit_range(const Clip *clip, float in_time) {
   return in_time;
 }
 
+// This will not work for if model and animation are in separate file.
+// This is because we use node index as ID, when we should use the names.
+// Meaning that for some i: gltfFile1.nodes[i] != gltfFile2.nodes[i]
 clip_array_t clip_load_animations_from_cgltf(cgltf_data *data) {
   u32 num_clips = data->animations_count;
   u32 num_nodes = data->nodes_count;
@@ -2005,13 +2000,11 @@ float clip_sample(const Clip *clip, Pose *out_pose, float time) {
 
     // right handed:
     // matAnimLeftHanded = matToRight*matToLeft*matAnim*matToRight
-    // transform_maybe_flip_hand(&local);
     Transform animated =
         transform_track_sample(ttrk, &local, time, clip->looping);
 
     // left handed:
     // matAnimLeftHanded = matToRight*matToLeft*matAnim*matToRight
-    // transform_maybe_flip_hand(&animated);
     // transform_print(&animated);
     out_pose->joints[joint] = animated;
   }
@@ -2171,6 +2164,25 @@ void set_vs_params() {
   state.vs_params = vs_params;
 }
 
+void cgltf_load_data(cgltf_data **data, cgltf_options *opts, const char *path) {
+  if (cgltf_parse_file(opts, path, data) != cgltf_result_success) {
+    printf("Failed to parse scene\n");
+    exit(1);
+  }
+
+  if (cgltf_load_buffers(opts, *data, path) != cgltf_result_success) {
+    cgltf_free(*data);
+    printf("Failed to load buffers\n");
+    exit(1);
+  }
+
+  if (cgltf_validate(*data) != cgltf_result_success) {
+    cgltf_free(*data);
+    printf("glTF data validation failed!\n");
+    exit(1);
+  }
+}
+
 void init(void) {
   sg_setup(&(sg_desc){
       .context = sapp_sgcontext(),
@@ -2179,26 +2191,22 @@ void init(void) {
 
   cgltf_options opts = {};
   ZERO(opts);
-  cgltf_data *data = NULL;
-  const char *path = "./src/assets/Woman.gltf";
+  cgltf_data *model_data = NULL;
+  // const char *path = "./src/assets/Woman.gltf";
   // const char *path = "./src/assets/scene.gltf";
   // const char *path = "./src/assets/simple_skin.gltf";
-  if (cgltf_parse_file(&opts, path, &data) != cgltf_result_success) {
-    printf("Failed to parse scene\n");
-    exit(1);
-  }
+  // const char *path = "./src/assets/vanguard.glb";
+  const char *path = "./src/assets/stacy.glb";
+  cgltf_load_data(&model_data, &opts, path);
 
-  if (cgltf_load_buffers(&opts, data, path) != cgltf_result_success) {
-    cgltf_free(data);
-    printf("Failed to load buffers\n");
-    exit(1);
-  }
+  cgltf_data *anim_data = NULL;
+  cgltf_options opts2 = {};
+  ZERO(opts2);
+  // const char *anim_path = "./src/assets/vanguard@bellydance.glb";
+  const char *anim_path = "./src/assets/vanguard@goofyrunning.glb";
+  cgltf_load_data(&anim_data, &opts2, anim_path);
 
-  if (cgltf_validate(data) != cgltf_result_success) {
-    cgltf_free(data);
-    printf("glTF data validation failed!\n");
-    exit(1);
-  }
+  // cgltf_free(model_data);
 
   state.animation = (AnimationInstance){
       .clip_idx = 0,
@@ -2206,15 +2214,24 @@ void init(void) {
       .model = transform_default(),
   };
 
-  state.clips = clip_load_animations_from_cgltf(data);
-  bonemesh_array_t meshes = bonemesh_load_meshes(data);
+  state.clips = clip_load_animations_from_cgltf(model_data);
+  clip_array_t anim_clips = clip_load_animations_from_cgltf(anim_data);
+  // static_assert(__same_type(__typeof__(&state.clips),
+  // __typeof__(&anim_clips)),
+  //               "");
+  // _array_concat((array_t *)(&state.clips), (const array_t *)(&anim_clips),
+  //               sizeof(Clip));
+  array_concat(Clip, &state.clips, &anim_clips);
+
+  bonemesh_array_t meshes = bonemesh_load_meshes(model_data);
   state.bm = meshes.ptr[0];
-  state.sk = skeleton_load(data);
+  state.sk = skeleton_load(model_data);
   pose_cpy(&state.sk.rest_pose, &state.animated_pose);
   pose_cpy(&state.sk.rest_pose, &state.animation.animated_pose);
   state.animation.pose_palette = array_empty(mat4array_t);
   array_reserve(mat4, &state.animation.pose_palette, state.sk.rest_pose.len);
 
+  printf("JOINTS LEN: %d\n", state.sk.rest_pose.len);
   state.pose_palette = array_empty(mat4array_t);
   state.inv_bind_pose = (mat4array_t){
       .ptr = state.sk.inv_bind_pose,
@@ -2224,19 +2241,24 @@ void init(void) {
 
   JOINT_NAMES = state.sk.joint_names;
 
+  u32 default_clip_index = 1;
+  state.animation.clip_idx = default_clip_index;
+
   printf("CLIPS: %zu\n", state.clips.len);
   for (u32 i = 0; i < state.clips.len; i++) {
     Clip *clip = &state.clips.ptr[i];
     if (clip->name == NULL)
       continue;
     printf("NAME: %s\n", clip->name);
-    if (strcmp(clip->name, "Running") == 0) {
+    if (strcmp(clip->name, "swingdance") == 0) {
       state.animation.clip_idx = i;
       clip->looping = true;
     }
   }
 
+  array_ref(Clip, &state.clips, default_clip_index)->looping = true;
   Clip *clip = &state.clips.ptr[state.animation.clip_idx];
+  printf("Selected clip: %s\n", clip->name);
   printf("CLIP TRACKS: %zu\n", clip->tracks.len);
   for (u32 i = 0; i < clip->tracks.len; i++) {
   }
@@ -2349,11 +2371,31 @@ void init(void) {
       0xFF000000, 0xFFFFFFFF, 0xFF000000, 0xFFFFFFFF,
   };
 
-  state.bind.fs.images[SLOT_tex] =
-      sg_make_image(&(sg_image_desc){.width = 4,
-                                     .height = 4,
-                                     .data.subimage[0][0] = SG_RANGE(pixels),
-                                     .label = "cube-texture"});
+  int width, height, channels;
+  // stbi_set_flip_vertically_on_load(1);
+  u8 *rgba_image =
+      stbi_load("./src/assets/stacy.jpeg", &width, &height, &channels, 4);
+  printf("CHANNELS: %d\n", channels);
+
+  // Allocate a new buffer for RGBA data
+  // u8 *rgba_image = malloc(width * height * 4);
+
+  // // Copy over and pad the data
+  // for (int i = 0; i < width * height; ++i) {
+  //   rgba_image[i * 4 + 0] = rgb_image[i * 3 + 0]; // R
+  //   rgba_image[i * 4 + 1] = rgb_image[i * 3 + 1]; // G
+  //   rgba_image[i * 4 + 2] = rgb_image[i * 3 + 2]; // B
+  //   rgba_image[i * 4 + 3] = 255;                  // A
+  // }
+
+  // safecheckf(channels == 4, "%d", channels);
+  state.bind.fs.images[SLOT_tex] = sg_make_image(&(sg_image_desc){
+      .width = width,
+      .height = height,
+      .pixel_format = SG_PIXELFORMAT_RGBA8,
+      //  .data.subimage[0][0] = SG_RANGE(pixels),
+      .data.subimage[0][0] = (sg_range){rgba_image, width * height * 4},
+      .label = "cube-texture"});
 
   // create a sampler object with default attributes
   state.bind.fs.samplers[SLOT_smp] = sg_make_sampler(&(sg_sampler_desc){0});
@@ -2395,7 +2437,7 @@ void frame(void) {
   //                            (HMM_Vec3){.X = 0.0f, .Y = 1.0f, .Z =
   //                            0.0f});
 
-  safecheck(state.animation.clip_idx == 0);
+  // safecheck(state.animation.clip_idx == 0);
   state.animation.t = clip_sample(&state.clips.ptr[state.animation.clip_idx],
                                   &state.animation.animated_pose,
                                   state.animation.t + (float)delta_time);
@@ -2425,17 +2467,19 @@ void frame(void) {
   // HMM_Mat4 rym = HMM_M4D(1.0);
 
   HMM_Mat4 rxm = HMM_Rotate(state.rx, (HMM_Vec3){{1.0f, 0.0f, 0.0f}});
-  HMM_Mat4 model =
-      HMM_MulM4(HMM_Translate(HMM_V3(0.0, -0.5, ZPOS)),
-                HMM_MulM4(rym, HMM_Scale(HMM_V3(0.25, 0.25, .25))));
+  HMM_Mat4 model = HMM_MulM4(HMM_Translate(HMM_V3(0.0, -0.5, ZPOS)),
+                             HMM_MulM4(rym, HMM_Scale(HMM_V3(0.5, 0.5, .5))));
 
   state.vs_params.model = model;
   state.vs_params.view = view;
   state.vs_params.projection = proj;
 
+  // sg_pass_action pass_action = {
+  //     .colors[0] = {.load_action = SG_LOADACTION_CLEAR,
+  //                   .clear_value = {0.25f, 0.5f, 0.75f, 1.0f}}};
   sg_pass_action pass_action = {
       .colors[0] = {.load_action = SG_LOADACTION_CLEAR,
-                    .clear_value = {0.25f, 0.5f, 0.75f, 1.0f}}};
+                    .clear_value = {0.0, 0.0, 0.0, 1.0f}}};
   sg_begin_default_pass(&pass_action, (int)w, (int)h);
   sg_apply_pipeline(state.pip);
   sg_apply_bindings(&state.bind);

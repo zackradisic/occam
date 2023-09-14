@@ -93,6 +93,23 @@ void _array_free(array_t *arr) {
   arr->len = 0;
 }
 
+static inline bool _array_check_overlap(const array_t *a, const array_t *b,
+                                        usize elem_size) {
+  if (a->ptr == NULL)
+    return b->ptr != NULL;
+  if (a->ptr == b->ptr)
+    return true;
+
+  // make sure a->ptr < b->ptr is always true
+  if ((usize)a->ptr > (usize)b->ptr) {
+    const array_t *temp = a;
+    a = b;
+    b = temp;
+  }
+
+  return b->ptr < a->ptr + a->len * elem_size;
+}
+
 #define GROW_CAPACITY(capacity) ((capacity) < 8 ? 8 : (capacity)*2)
 #define MIN_X(a, b) ((a) < (b) ? (a) : (b))
 
@@ -153,6 +170,16 @@ void _array_reserve(array_t *arr, usize elem_size, usize amount) {
   array_grow(arr, elem_size, amount_to_grow);
 }
 
+void _array_concat(array_t *dest, const array_t *src, usize elem_size) {
+  _array_reserve(dest, elem_size, src->len);
+  if (UNLIKELY(_array_check_overlap(dest, src, elem_size))) {
+    memmove(&dest->ptr[dest->len * elem_size], src->ptr, src->len * elem_size);
+  } else {
+    memcpy(&dest->ptr[dest->len * elem_size], src->ptr, src->len * elem_size);
+  }
+  dest->len += src->len;
+}
+
 void _array_shrink_to_fit(array_t *arr) {
   if (arr->cap == arr->len) {
     return;
@@ -177,6 +204,11 @@ void _array_shrink_to_fit(array_t *arr) {
 
 #define array_pop(T, a) (((T *)(a)->ptr)[--a->len])
 #define array_reserve(T, a, n) _array_reserve((array_t *)(a), sizeof(T), n)
+#define array_concat(T, dest, src)                                             \
+  ({                                                                           \
+    static_assert(__same_type(__typeof__(dest), __typeof__(src)), "");         \
+    _array_concat((array_t *)(dest), (const array_t *)(src), sizeof(T));       \
+  })
 
 #define ARRAY_H_
 

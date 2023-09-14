@@ -59,10 +59,9 @@ void main() {
 	vec3 l = normalize(light);
 	float diffuseIntensity = clamp(dot(n, l) + 0.1, 0, 1);
  
-	// FragColor = diffuseColor * diffuseIntensity;
 	FragColor = diffuseColor * diffuseIntensity;
 
-	FragColor = vec4(1.0, 1.0, 1.0, 1.0) * diffuseIntensity;
+	// FragColor = vec4(1.0, 1.0, 1.0, 1.0) * diffuseIntensity;
 	// FragColor = vec4(1.0, 0.0, 0.0, 1.0) ;
 }
 @end
