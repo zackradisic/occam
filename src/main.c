@@ -5,7 +5,7 @@
 
 #define DEBUG 1
 
-#define DISABLE_GUI
+// #define DISABLE_GUI
 
 // #define CPU_SKIN
 
@@ -22,6 +22,7 @@
 #else
 #include "shaders/bonemesh.glsl.h"
 #endif
+#include "shaders/cel.glsl.h"
 
 #include "stdio.h"
 #include "arena.h"
@@ -2030,6 +2031,15 @@ void clip_load_additional_animations_from_cgltf(cgltf_data *data,
 
       if (channel->target_path == cgltf_animation_path_type_translation) {
         track_from_cgltf_channel(&trk->position, channel, FRAME_VEC3);
+        cgltf_node *parent = model_nodes[node_id].parent;
+        int parent_idx =
+            cgltf_get_node_index(parent, model_nodes, model_node_count);
+        if (strcmp(name, "goofyrunning") == 0) {
+          vec3_frame_t *frames = (vec3_frame_t *)&trk->position.frames.ptr;
+          for (u32 i = 0; i < trk->position.frames.len; i++) {
+            frames[i].value = HMM_V3(0.0, 0.0, 0.0);
+          }
+        }
       } else if (channel->target_path == cgltf_animation_path_type_scale) {
         track_from_cgltf_channel(&trk->scale, channel, FRAME_VEC3);
       } else if (channel->target_path == cgltf_animation_path_type_rotation) {
@@ -2290,7 +2300,7 @@ void cross_fade_controller_update(CrossFadeController *cfc, float dt) {
   for (u32 i = 0; i < num_targets; i++) {
     CrossFadeTarget *target = &cfc->targets.ptr[i];
     float duration = target->duration;
-    if (target->elapsed > -duration) {
+    if (target->elapsed >= duration) {
       cfc->clip = target->clip;
       cfc->time = target->time;
       pose_deinit(&cfc->pose);
@@ -2507,9 +2517,14 @@ void cgltf_load_data(cgltf_data **data, cgltf_options *opts, const char *path) {
   }
 }
 
+// Vertex structure for quad
+typedef struct {
+  float x, y;
+  float u, v;
+} vertex_t;
+
 void init(void) {
   ZERO(state);
-  orbit_camera_init(&state.camera);
 
   sg_setup(&(sg_desc){
       .context = sapp_sgcontext(),
@@ -2557,6 +2572,10 @@ void init(void) {
 
   // clip_array_t anim_clips = clip_load_animations_from_cgltf(anim_data);
   // array_concat(Clip, &state.clips, &anim_clips);
+
+  for (usize i = 0; i < state.clips.len; i++) {
+    state.clips.ptr[i].looping = true;
+  }
 
   bonemesh_array_t meshes = bonemesh_load_meshes(model_data);
   state.bm = meshes.ptr[0];
@@ -2713,23 +2732,12 @@ void init(void) {
   // stbi_set_flip_vertically_on_load(1);
   // u8 *rgba_image =
   //     stbi_load("./src/assets/stacy.jpeg", &width, &height, &channels, 4);
-  u8 *rgba_image =
-      stbi_load("./src/assets/vanguard.png", &width, &height, &channels, 4);
+  // u8 *rgba_image =
+  //     stbi_load("./src/assets/vanguard.png", &width, &height, &channels, 4);
+  u8 *rgba_image = stbi_load("./src/assets/vanguard_pixel.png", &width, &height,
+                             &channels, 4);
   safecheck(rgba_image != NULL);
-  printf("CHANNELS: %d\n", channels);
 
-  // Allocate a new buffer for RGBA data
-  // u8 *rgba_image = malloc(width * height * 4);
-
-  // // Copy over and pad the data
-  // for (int i = 0; i < width * height; ++i) {
-  //   rgba_image[i * 4 + 0] = rgb_image[i * 3 + 0]; // R
-  //   rgba_image[i * 4 + 1] = rgb_image[i * 3 + 1]; // G
-  //   rgba_image[i * 4 + 2] = rgb_image[i * 3 + 2]; // B
-  //   rgba_image[i * 4 + 3] = 255;                  // A
-  // }
-
-  // safecheckf(channels == 4, "%d", channels);
   state.bind.fs.images[SLOT_tex] = sg_make_image(&(sg_image_desc){
       .width = width,
       .height = height,
@@ -2752,6 +2760,8 @@ void init(void) {
       .logger.func = slog_func,
   });
 #endif
+
+  orbit_camera_init(&state.camera);
 }
 
 #ifndef DISABLE_GUI
@@ -2774,6 +2784,14 @@ void frame(void) {
   vec3 light_dir = orbit_camera_direction(&state.camera);
   memcpy(&fs_params.light, &light_dir, sizeof(vec3));
 
+  //   fs_params.light[0] = 0.0;
+  //   fs_params.light[1] = 0.0;
+  // #ifdef LEFT_HANDED
+  //   fs_params.light[2] = 1.0;
+  // #else
+  //   fs_params.light[2] = -1.0;
+  // #endif
+
   const float t = (float)(sapp_frame_duration() * 60.0);
 
   // HMM_Mat4 proj = HMM_Perspective(90.0, w / h, 0.1f, 100.0f);
@@ -2785,18 +2803,18 @@ void frame(void) {
   // safecheck(state.animation.clip_idx == 0);
   cross_fade_controller_update(&state.fade_controller, delta_time);
   state.fade_timer -= delta_time;
-  if (flt_zero(state.fade_timer)) {
-    state.fade_timer = 3.0f;
+  // if (flt_zero(state.fade_timer)) {
+  //   state.fade_timer = 3.0f;
 
-    u32 clip = state.animation.clip_idx;
-    while (clip == state.animation.clip_idx) {
-      clip = (clip + 1) % state.clips.len;
-    }
-    state.animation.clip_idx = clip;
-    cross_fade_controller_fade_to(&state.fade_controller,
-                                  &state.clips.ptr[state.animation.clip_idx],
-                                  0.5);
-  }
+  //   u32 clip = state.animation.clip_idx;
+  //   while (clip == state.animation.clip_idx) {
+  //     clip = (clip + 1) % state.clips.len;
+  //   }
+  //   state.animation.clip_idx = clip;
+  //   cross_fade_controller_fade_to(&state.fade_controller,
+  //                                 &state.clips.ptr[state.animation.clip_idx],
+  //                                 0.5);
+  // }
   // printf("animt %f delta_time %f last_time %llu\n", state.animation.t,
   //        (float)delta_time, last_time);
 
@@ -2816,7 +2834,6 @@ void frame(void) {
   HMM_Mat4 proj =
       HMM_Orthographic(-aspect_ratio, aspect_ratio, -1, 1, 0.0001, 1000);
   // HMM_Mat4 view = HMM_M4D(1.0);
-  // camera_update(&state.camera);
   HMM_Mat4 view = state.camera.view_matrix;
 
   state.ry += 1.0f * t;
@@ -2947,6 +2964,9 @@ static int draw_debug_gui(struct nk_context *ctx) {
     if ((u32)selected_animation != state.animation.clip_idx) {
       // state.animation.t = 0.0;
       state.animation.clip_idx = selected_animation;
+      cross_fade_controller_fade_to(&state.fade_controller,
+                                    &state.clips.ptr[state.animation.clip_idx],
+                                    0.5);
     }
   }
 
