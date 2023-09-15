@@ -188,10 +188,29 @@ void _array_shrink_to_fit(array_t *arr) {
   arr->cap = arr->len;
 }
 
+void _array_copy(array_t *dest, const array_t *src, usize elem_size) {
+  u8 *ptr = (u8 *)malloc(src->len * elem_size);
+  dest->ptr = ptr;
+  dest->len = src->len;
+  dest->cap = src->len;
+}
+
+void _array_erase(array_t *arr, usize idx, usize elem_size) {
+  safecheck(arr->len > 0);
+  // shift all elements after to the left by one
+  if (idx < arr->len - 1) {
+    usize shift_amount = (arr->len - 1) - idx;
+    memmove(&arr->ptr[idx * elem_size], &arr->ptr[(idx + 1) * elem_size],
+            shift_amount);
+  }
+  arr->len -= 1;
+}
+
 #define array_empty(T) ((T){.ptr = NULL, .len = 0, .cap = 0})
 #define array_init(T, a, cap) _array_init((array_t *)(a), (cap), sizeof(T))
 #define array_shrink_to_fit(a) _array_shrink_to_fit((array_t *)(a))
 #define array_free(a) _array_free((array_t *)a)
+#define array_erase(T, a, i) _array_erase((array_t *)(a), i, sizeof(T))
 
 #define array_push(T, a, val)                                                  \
   ({                                                                           \
@@ -202,6 +221,8 @@ void _array_shrink_to_fit(array_t *arr) {
         : (((T *)__a->ptr)[__a->len++] = (val), true);                         \
   })
 
+#define array_clear(a) (a)->len = 0;
+#define array_copy(T, dest, src) _array_copy(dest, src, sizeof(T))
 #define array_pop(T, a) (((T *)(a)->ptr)[--a->len])
 #define array_reserve(T, a, n) _array_reserve((array_t *)(a), sizeof(T), n)
 #define array_concat(T, dest, src)                                             \

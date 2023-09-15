@@ -116,6 +116,10 @@ typedef HMM_Quat quat;
 typedef HMM_Mat3 mat3;
 typedef HMM_Mat4 mat4;
 
+static inline float interpolate_scalar(float a, float b, float t);
+static inline vec3 interpolate_vec3(vec3 a, vec3 b, float t);
+static inline quat interpolate_quat(quat a, quat b, float t);
+
 typedef array_type(mat4) mat4array_t;
 typedef array_type(float) floatarray_t;
 typedef array_type(u32) u32array_t;
@@ -548,6 +552,19 @@ Transform cgltf_get_local_transform(cgltf_node *n);
 // This function should be called whenever we create a transform from glTF
 // values, this is because glTF uses a right handed coordinate system.
 void transform_convert_handedness(Transform *t);
+
+Transform transform_mix(const Transform *a, const Transform *b, float t) {
+  quat brot = b->rotation;
+  if (flte_zero(quat_dot(a->rotation, brot))) {
+    brot = HMM_MulQF(brot, -1);
+  }
+
+  return (Transform){
+      .position = interpolate_vec3(a->position, b->position, t),
+      .rotation = interpolate_quat(a->rotation, brot, t),
+      .scale = interpolate_vec3(a->scale, b->scale, t),
+  };
+}
 
 void transform_convert_handedness(Transform *t) {
 #ifdef LEFT_HANDED
@@ -1392,18 +1409,42 @@ Pose pose_default() {
   };
 }
 
-void pose_init(Pose *pose, u32 joints_len) {
-  pose->joints = (Transform *)malloc(sizeof(Transform) * joints_len);
-  pose->parents = (int *)malloc(sizeof(int) * joints_len);
-  pose->len = joints_len;
-}
-
 void pose_deinit(Pose *pose) {
   free(pose->joints);
   free(pose->parents);
   pose->joints = NULL;
   pose->parents = NULL;
   pose->len = 0;
+}
+
+bool pose_is_in_hierarchy(const Pose *pose, u32 parent, u32 search) {
+  if (search == parent)
+    return true;
+
+  for (int p = pose->parents[search]; p >= 0; p = pose->parents[p]) {
+    if (p == (int)parent)
+      return true;
+  }
+
+  return false;
+}
+
+void pose_blend(Pose *output, const Pose *a, const Pose *b, float t, int root) {
+  u32 num_joints = output->len;
+  for (u32 i = 0; i < num_joints; i++) {
+    if (root >= 0) {
+      if (!pose_is_in_hierarchy(output, (u32)root, i))
+        continue;
+    }
+
+    output->joints[i] = transform_mix(&a->joints[i], &b->joints[i], t);
+  }
+}
+
+void pose_init(Pose *pose, u32 joints_len) {
+  pose->joints = (Transform *)malloc(sizeof(Transform) * joints_len);
+  pose->parents = (int *)malloc(sizeof(int) * joints_len);
+  pose->len = joints_len;
 }
 
 void pose_resize(Pose *pose, u32 new_joints_len) {
@@ -1548,20 +1589,6 @@ void pose_get_matrix_palette(const Pose *pose, mat4array_t *matrices) {
   matrices->len = pose->len;
 }
 
-// bool pose_eq(const Pose *a, const Pose *b) {
-//   if (a->len != b->len)
-//     return false;
-
-//   for (u32 i = 0; i < a->len; i++) {
-//     if (!(transform_eq(&a->joints[i], &b->joints[i]) &&
-//           a->parents[i] == b->parents[i])) {
-//       return false;
-//     }
-//   }
-
-//   return true;
-// }
-
 // Contains shared data for all instances of a character.
 typedef struct {
   Pose rest_pose;
@@ -1573,6 +1600,17 @@ typedef struct {
 } Skeleton;
 
 void skeleton_update_inverse_bind_pose(Skeleton *sk);
+
+void skeleton_cpy(Skeleton *dest, const Skeleton *src) {
+  pose_cpy(&src->rest_pose, &dest->rest_pose);
+  pose_cpy(&src->bind_pose, &dest->bind_pose);
+  dest->joint_names = (char **)malloc(sizeof(char *) * src->joints_len);
+  dest->inv_bind_pose = (mat4 *)malloc(sizeof(mat4) * src->joints_len);
+  memcpy(&dest->joint_names, &src->joint_names,
+         sizeof(char *) * src->joints_len);
+  memcpy(&dest->inv_bind_pose, &src->inv_bind_pose,
+         sizeof(mat4) * src->joints_len);
+}
 
 Skeleton skeleton_load(cgltf_data *data) {
   Pose rest_pose = pose_load_rest_pose_from_cgltf(data);
@@ -2170,6 +2208,144 @@ void cgltf_get_scalar_values(floatarray_t *out, u32 comp_count,
                                         &out->ptr[i * comp_count], comp_count));
   }
   out->len = len;
+}
+
+typedef struct {
+  Pose pose;
+  // this struct does not own this clip
+  Clip *clip;
+  float time;
+  float duration;
+  float elapsed;
+} CrossFadeTarget;
+
+void cross_fade_target_deinit(CrossFadeTarget *cft) { pose_deinit(&cft->pose); }
+
+typedef array_type(CrossFadeTarget) cross_fade_target_array_t;
+
+typedef struct {
+  cross_fade_target_array_t targets;
+  Clip *clip;
+  float time;
+  Pose pose;
+  Skeleton skeleton;
+  bool skeleton_set;
+} CrossFadeController;
+
+CrossFadeController cross_fade_controller_init() {
+  CrossFadeController out;
+  ZERO(out);
+  return out;
+}
+
+void cross_fade_controller_set_skeleton(CrossFadeController *cfc,
+                                        Skeleton *sk) {
+  pose_cpy(&sk->rest_pose, &cfc->pose);
+  skeleton_cpy(&cfc->skeleton, sk);
+  cfc->skeleton_set = true;
+}
+
+void cross_fade_controller_play(CrossFadeController *cfc, Clip *target) {
+  for (usize i = 0; i < cfc->targets.len; i++) {
+    cross_fade_target_deinit(&cfc->targets.ptr[i]);
+  }
+  array_clear(&cfc->targets);
+
+  cfc->clip = target;
+  pose_cpy(&cfc->skeleton.rest_pose, &cfc->pose);
+  cfc->time = target->start_time;
+}
+
+void cross_fade_controller_fade_to(CrossFadeController *cfc, Clip *target,
+                                   float fade_time) {
+  if (cfc->clip == NULL) {
+    cross_fade_controller_play(cfc, target);
+    return;
+  }
+
+  // If it is the last target do nothing
+  if (cfc->targets.len >= 1 &&
+      cfc->targets.ptr[cfc->targets.len - 1].clip == target) {
+    return;
+  } else if (cfc->clip == target) {
+    return;
+  }
+
+  CrossFadeTarget cft;
+  ZERO(cft);
+  cft.clip = target;
+  pose_cpy(&cfc->skeleton.rest_pose, &cft.pose);
+  cft.duration = fade_time;
+
+  array_push(CrossFadeTarget, &cfc->targets, cft);
+}
+
+void cross_fade_controller_update(CrossFadeController *cfc, float dt) {
+  if (cfc->clip == NULL || !cfc->skeleton_set)
+    return;
+
+  usize num_targets = cfc->targets.len;
+  for (u32 i = 0; i < num_targets; i++) {
+    CrossFadeTarget *target = &cfc->targets.ptr[i];
+    float duration = target->duration;
+    if (target->elapsed > -duration) {
+      cfc->clip = target->clip;
+      cfc->time = target->time;
+      pose_deinit(&cfc->pose);
+      pose_cpy(&target->pose, &cfc->pose);
+      array_erase(CrossFadeTarget, &cfc->targets, i);
+      break;
+    }
+  }
+
+  num_targets = cfc->targets.len;
+  pose_cpy(&cfc->skeleton.rest_pose, &cfc->pose);
+  cfc->time = clip_sample(cfc->clip, &cfc->pose, cfc->time + dt);
+
+  for (u32 i = 0; i < num_targets; i++) {
+    CrossFadeTarget *target = &cfc->targets.ptr[i];
+    target->time = clip_sample(target->clip, &target->pose, target->time + dt);
+    target->elapsed += dt;
+    float t = target->elapsed / target->duration;
+    if (fgt(t, 1.0)) {
+      t = 1.0;
+    }
+    pose_blend(&cfc->pose, &cfc->pose, &target->pose, t, -1);
+  }
+}
+
+Pose blending_make_additive_pose(const Skeleton *sk, const Clip *clip) {
+  Pose result;
+  ZERO(result);
+  pose_cpy(&sk->rest_pose, &result);
+  clip_sample(clip, &result, clip->start_time);
+  return result;
+}
+
+void blending_add(Pose *output, const Pose *in_pose, const Pose *add_pose,
+                  const Pose *base_pose, int blendroot) {
+  u32 num_joints = add_pose->len;
+  for (u32 i = 0; i < num_joints; i++) {
+    Transform input = in_pose->joints[i];
+    Transform additive = add_pose->joints[i];
+    Transform additive_base = base_pose->joints[i];
+
+    if (blendroot >= 0 && !pose_is_in_hierarchy(add_pose, blendroot, i)) {
+      continue;
+    }
+
+    // out_pose = in_pose + (add_pose - base_pose)
+    Transform result = {
+        .position =
+            HMM_AddV3(input.position,
+                      HMM_SubV3(additive.position, additive_base.position)),
+        .rotation = quat_norm(quat_mul_quat(
+            input.rotation, quat_mul_quat(quat_inverse(additive_base.rotation),
+                                          additive.rotation))),
+        .scale = HMM_AddV3(input.scale,
+                           HMM_SubV3(additive.scale, additive_base.scale)),
+    };
+  }
 }
 
 typedef struct {
