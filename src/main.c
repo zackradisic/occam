@@ -2187,6 +2187,68 @@ typedef struct {
 } DebugGui;
 #endif
 
+typedef struct {
+  vec3 focus_point; // The point around which the camera orbits
+  float distance;   // Distance from the focus point
+  float yaw;        // Horizontal rotation angle in degrees
+  float pitch;      // Vertical rotation angle in degrees
+  mat4 view_matrix;
+} OrbitCamera;
+
+void orbit_camera_update(OrbitCamera *camera);
+
+#ifdef LEFT_HANDED
+#define ZPOS 1.1
+#define ZCAMERAPOS -3.1
+#else
+#define ZPOS -1.1
+#define ZCAMERAPOS 3.1
+#endif
+
+void orbit_camera_init(OrbitCamera *camera) {
+  camera->focus_point = HMM_V3(0.0f, 0.0f, ZPOS);
+  camera->distance = 6.0f; // Initial distance from the focus point
+  camera->yaw = 0.0f;      // Initial yaw, in degrees
+  camera->pitch = 90.0f; // Initial pitch, in degrees (90 degrees means looking
+                         // straight down)
+
+  orbit_camera_update(camera);
+}
+
+vec3 orbit_camera_direction(const OrbitCamera *camera) {
+  float yaw_radians = HMM_ToRad(camera->yaw);
+  float pitch_radians = HMM_ToRad(camera->pitch);
+
+  // Calculate the new camera position based on the angles and distance
+  vec3 eye_position;
+  eye_position.X = camera->focus_point.X +
+                   camera->distance * cosf(yaw_radians) * sinf(pitch_radians);
+  eye_position.Y =
+      camera->focus_point.Y + camera->distance * cosf(pitch_radians);
+  eye_position.Z = camera->focus_point.Z +
+                   camera->distance * sinf(yaw_radians) * sinf(pitch_radians);
+
+  return HMM_SubV3(camera->focus_point, eye_position);
+}
+
+void orbit_camera_update(OrbitCamera *camera) {
+  float yaw_radians = HMM_ToRad(camera->yaw);
+  float pitch_radians = HMM_ToRad(camera->pitch);
+
+  // Calculate the new camera position based on the angles and distance
+  vec3 eye_position;
+  eye_position.X = camera->focus_point.X +
+                   camera->distance * cosf(yaw_radians) * sinf(pitch_radians);
+  eye_position.Y =
+      camera->focus_point.Y + camera->distance * cosf(pitch_radians);
+  eye_position.Z = camera->focus_point.Z +
+                   camera->distance * sinf(yaw_radians) * sinf(pitch_radians);
+
+  // Create the view matrix
+  camera->view_matrix =
+      HMM_LookAt(eye_position, camera->focus_point, HMM_V3(0.0f, 1.0f, 0.0f));
+}
+
 static struct {
   float rx, ry;
   sg_pipeline pip;
@@ -2199,6 +2261,7 @@ static struct {
   mat4array_t inv_bind_pose;
   vs_params_t vs_params;
   AnimationInstance animation;
+  OrbitCamera camera;
 #ifdef DEBUG
   DebugGui gui;
 #endif
@@ -2269,6 +2332,8 @@ void cgltf_load_data(cgltf_data **data, cgltf_options *opts, const char *path) {
 
 void init(void) {
   ZERO(state);
+  orbit_camera_init(&state.camera);
+
   sg_setup(&(sg_desc){
       .context = sapp_sgcontext(),
       .logger.func = slog_func,
@@ -2304,6 +2369,7 @@ void init(void) {
   };
 
   state.clips = clip_load_animations_from_cgltf(model_data);
+  state.clips.ptr[0].name = "bind";
   clip_load_additional_animations_from_cgltf(anim_data, "goofyrunning",
                                              &state.clips, model_data->nodes,
                                              model_data->nodes_count);
@@ -2311,6 +2377,11 @@ void init(void) {
   cgltf_load_data(&anim_data, &opts2, anim_path);
   clip_load_additional_animations_from_cgltf(anim_data, "bellydance",
                                              &state.clips, model_data->nodes,
+                                             model_data->nodes_count);
+  anim_path = "./src/assets/vanguard@samba.glb";
+  cgltf_load_data(&anim_data, &opts2, anim_path);
+  clip_load_additional_animations_from_cgltf(anim_data, "samba", &state.clips,
+                                             model_data->nodes,
                                              model_data->nodes_count);
 
   // clip_array_t anim_clips = clip_load_animations_from_cgltf(anim_data);
@@ -2534,21 +2605,8 @@ void frame(void) {
   double delta_time = stm_sec(stm_laptime(&last_time));
 
   fs_params_t fs_params;
-  fs_params.light[0] = 0.0;
-  fs_params.light[1] = 0.0;
-#ifdef LEFT_HANDED
-  fs_params.light[2] = 1.0;
-#else
-  fs_params.light[2] = -1.0;
-#endif
-
-#ifdef LEFT_HANDED
-#define ZPOS 4.1
-#define ZCAMERAPOS 6.1
-#else
-#define ZPOS -1.1
-#define ZCAMERAPOS 3.1
-#endif
+  vec3 light_dir = orbit_camera_direction(&state.camera);
+  memcpy(&fs_params.light, &light_dir, sizeof(vec3));
 
   const float t = (float)(sapp_frame_duration() * 60.0);
 
@@ -2556,8 +2614,7 @@ void frame(void) {
   // HMM_Mat4 view = HMM_LookAt((HMM_Vec3){.X = 0.0f, .Y = 0.0f, .Z =
   // ZCAMERAPOS},
   //                            (HMM_Vec3){.X = 0.0f, .Y = 0.0f, .Z = 0.0f},
-  //                            (HMM_Vec3){.X = 0.0f, .Y = 1.0f, .Z =
-  //                            0.0f});
+  //                            (HMM_Vec3){.X = 0.0f, .Y = 1.0f, .Z = 0.0f});
 
   // safecheck(state.animation.clip_idx == 0);
   state.animation.t = clip_sample(&state.clips.ptr[state.animation.clip_idx],
@@ -2579,9 +2636,12 @@ void frame(void) {
          sizeof(mat4) * state.inv_bind_pose.len);
 
   const float aspect_ratio = w / h;
+  // HMM_Mat4 proj = HMM_Perspective(50.0, w / h, 0.1f, 100.0f);
   HMM_Mat4 proj =
       HMM_Orthographic(-aspect_ratio, aspect_ratio, -1, 1, 0.0001, 1000);
-  HMM_Mat4 view = HMM_M4D(1.0);
+  // HMM_Mat4 view = HMM_M4D(1.0);
+  // camera_update(&state.camera);
+  HMM_Mat4 view = state.camera.view_matrix;
 
   state.ry += 1.0f * t;
   state.rx += 1.0f * t;
@@ -2618,7 +2678,44 @@ void frame(void) {
 
 void cleanup(void) { sg_shutdown(); }
 
-void input(const sapp_event *event) { snk_handle_event(event); }
+static bool mouse_dragging = false;
+
+void input(const sapp_event *ev) {
+  switch (ev->type) {
+  case SAPP_EVENTTYPE_MOUSE_DOWN:
+    if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT) {
+      mouse_dragging = true;
+    }
+    break;
+  case SAPP_EVENTTYPE_MOUSE_UP:
+    if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT) {
+      mouse_dragging = false;
+    }
+    break;
+  case SAPP_EVENTTYPE_MOUSE_MOVE:
+    if (mouse_dragging) {
+      float MOUSE_SENSITIVITY = 0.2f;
+
+      // Update camera angles based on mouse movement
+      state.camera.yaw += ev->mouse_dx * MOUSE_SENSITIVITY;
+      state.camera.pitch -= ev->mouse_dy * MOUSE_SENSITIVITY;
+
+      // Clamp the pitch angle to avoid gimbal lock
+      if (state.camera.pitch > 89.0f)
+        state.camera.pitch = 89.0f;
+      if (state.camera.pitch < -89.0f)
+        state.camera.pitch = -89.0f;
+
+      // Update the camera's position and view matrix
+      orbit_camera_update(&state.camera);
+    }
+    break;
+  default:
+    break;
+  }
+
+  snk_handle_event(ev);
+}
 
 sapp_desc sokol_main(int argc, char *argv[]) {
   (void)argc;
