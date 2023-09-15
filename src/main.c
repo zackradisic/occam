@@ -5,6 +5,8 @@
 
 #define DEBUG 1
 
+#define DISABLE_GUI
+
 // #define CPU_SKIN
 
 #define SOKOL_IMPL
@@ -29,7 +31,7 @@
 #include <cgltf.h>
 #include "array.h"
 
-#ifdef DEBUG
+#ifndef DISABLE_GUI
 #define _CRT_SECURE_NO_WARNINGS (1)
 // include nuklear.h before the sokol_nuklear.h implementation
 #define NK_IMPLEMENTATION
@@ -2349,11 +2351,8 @@ void blending_add(Pose *output, const Pose *in_pose, const Pose *add_pose,
 }
 
 typedef struct {
-  Pose animated_pose;
   mat4array_t pose_palette;
   u32 clip_idx;
-  float t;
-  Transform model;
 } AnimationInstance;
 
 #ifdef DEBUG
@@ -2437,6 +2436,8 @@ static struct {
   mat4array_t inv_bind_pose;
   vs_params_t vs_params;
   AnimationInstance animation;
+  float fade_timer;
+  CrossFadeController fade_controller;
   OrbitCamera camera;
 #ifdef DEBUG
   DebugGui gui;
@@ -2538,12 +2539,6 @@ void init(void) {
 
   // cgltf_free(model_data);
 
-  state.animation = (AnimationInstance){
-      .clip_idx = 0,
-      .t = 0,
-      .model = transform_default(),
-  };
-
   state.clips = clip_load_animations_from_cgltf(model_data);
   state.clips.ptr[0].name = "bind";
   clip_load_additional_animations_from_cgltf(anim_data, "goofyrunning",
@@ -2567,7 +2562,6 @@ void init(void) {
   state.bm = meshes.ptr[0];
   state.sk = skeleton_load(model_data);
   pose_cpy(&state.sk.rest_pose, &state.animated_pose);
-  pose_cpy(&state.sk.rest_pose, &state.animation.animated_pose);
   state.animation.pose_palette = array_empty(mat4array_t);
   array_reserve(mat4, &state.animation.pose_palette, state.sk.rest_pose.len);
 
@@ -2581,23 +2575,15 @@ void init(void) {
   JOINT_NAMES = state.sk.joint_names;
 
   u32 default_clip_index = 0;
-  state.animation.clip_idx = default_clip_index;
 
-  printf("CLIPS: %zu\n", state.clips.len);
-  for (u32 i = 0; i < state.clips.len; i++) {
-    Clip *clip = &state.clips.ptr[i];
-    clip->looping = true;
-    if (clip->name == NULL)
-      continue;
-    if (strcmp(clip->name, "swingdance") == 0) {
-      state.animation.clip_idx = i;
-      clip->looping = true;
-    }
-  }
-
-  array_ref(Clip, &state.clips, default_clip_index)->looping = true;
-  Clip *clip = &state.clips.ptr[state.animation.clip_idx];
-  printf("Selected clip: %s\n", clip->name);
+  state.fade_timer = 3.0f;
+  state.fade_controller = cross_fade_controller_init();
+  cross_fade_controller_set_skeleton(&state.fade_controller, &state.sk);
+  state.animation.clip_idx = 1;
+  cross_fade_controller_play(&state.fade_controller, &state.clips.ptr[1]);
+  cross_fade_controller_update(&state.fade_controller, 0.0);
+  pose_get_matrix_palette(&state.fade_controller.pose,
+                          &state.animation.pose_palette);
 
 #ifdef DEBUG
   strarray_t names = array_empty(strarray_t);
@@ -2758,27 +2744,31 @@ void init(void) {
   set_vs_params();
   stm_setup();
 
+#ifndef DISABLE_GUI
   // use sokol-nuklear with all default-options (we're not doing
   // multi-sampled rendering or using non-default pixel formats)
   snk_setup(&(snk_desc_t){
       .dpi_scale = sapp_dpi_scale(),
       .logger.func = slog_func,
   });
+#endif
 }
 
-#ifdef DEBUG
+#ifndef DISABLE_GUI
 static int draw_debug_gui(struct nk_context *ctx);
 #endif
 
 static u64 last_time = 0;
 void frame(void) {
+#ifndef DISABLE_GUI
   struct nk_context *ctx = snk_new_frame();
   draw_debug_gui(ctx);
+#endif
 
   const float w = sapp_widthf();
   const float h = sapp_heightf();
 
-  double delta_time = stm_sec(stm_laptime(&last_time));
+  float delta_time = (float)stm_sec(stm_laptime(&last_time));
 
   fs_params_t fs_params;
   vec3 light_dir = orbit_camera_direction(&state.camera);
@@ -2793,14 +2783,24 @@ void frame(void) {
   //                            (HMM_Vec3){.X = 0.0f, .Y = 1.0f, .Z = 0.0f});
 
   // safecheck(state.animation.clip_idx == 0);
-  state.animation.t = clip_sample(&state.clips.ptr[state.animation.clip_idx],
-                                  &state.animation.animated_pose,
-                                  state.animation.t + (float)delta_time);
+  cross_fade_controller_update(&state.fade_controller, delta_time);
+  state.fade_timer -= delta_time;
+  if (flt_zero(state.fade_timer)) {
+    state.fade_timer = 3.0f;
 
+    u32 clip = state.animation.clip_idx;
+    while (clip == state.animation.clip_idx) {
+      clip = (clip + 1) % state.clips.len;
+    }
+    state.animation.clip_idx = clip;
+    cross_fade_controller_fade_to(&state.fade_controller,
+                                  &state.clips.ptr[state.animation.clip_idx],
+                                  0.5);
+  }
   // printf("animt %f delta_time %f last_time %llu\n", state.animation.t,
   //        (float)delta_time, last_time);
 
-  pose_get_matrix_palette(&state.animation.animated_pose,
+  pose_get_matrix_palette(&state.fade_controller.pose,
                           &state.animation.pose_palette);
 
   // Copy the transformation matrices for the joints
@@ -2846,7 +2846,10 @@ void frame(void) {
                     &SG_RANGE(state.vs_params));
   sg_apply_uniforms(SG_SHADERSTAGE_FS, SLOT_fs_params, &SG_RANGE(fs_params));
   sg_draw(0, state.bm.indices.len, 1);
+
+#ifndef DISABLE_GUI
   snk_render(sapp_width(), sapp_height());
+#endif
 
   sg_end_pass();
   sg_commit();
@@ -2890,7 +2893,9 @@ void input(const sapp_event *ev) {
     break;
   }
 
+#ifndef DISABLE_GUI
   snk_handle_event(ev);
+#endif
 }
 
 sapp_desc sokol_main(int argc, char *argv[]) {
@@ -2926,7 +2931,7 @@ sapp_desc sokol_main(int argc, char *argv[]) {
   };
 }
 
-#ifdef DEBUG
+#ifndef DISABLE_GUI
 static int draw_debug_gui(struct nk_context *ctx) {
   if (nk_begin(ctx, "Animation Selector", nk_rect(50, 50, 220, 220),
                NK_WINDOW_BORDER | NK_WINDOW_MOVABLE | NK_WINDOW_CLOSABLE)) {
@@ -2934,13 +2939,13 @@ static int draw_debug_gui(struct nk_context *ctx) {
     nk_layout_row_static(ctx, 30, 200, 1);
     if (nk_checkbox_label(ctx, "Disable loop",
                           &state.clips.ptr[state.animation.clip_idx].looping)) {
-      state.animation.t = 0.0;
+      // state.animation.t = 0.0;
     }
     int selected_animation =
         nk_combo(ctx, state.gui.animations.ptr, state.gui.animations.len,
                  state.animation.clip_idx, 25, nk_vec2(200, 200));
     if ((u32)selected_animation != state.animation.clip_idx) {
-      state.animation.t = 0.0;
+      // state.animation.t = 0.0;
       state.animation.clip_idx = selected_animation;
     }
   }

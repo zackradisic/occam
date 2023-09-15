@@ -30,6 +30,7 @@ typedef size_t usize;
 
 int float_eq(float a, float b);
 #define flte_zero(a) (a) <= FLT_EPSILON ? true : false
+#define flt_zero(a) (a) < FLT_EPSILON ? true : false
 #define fgt(a, b) (a - b) > FLT_EPSILON
 
 #define ZMEM_HAVE_POSIX_MEMALIGN
