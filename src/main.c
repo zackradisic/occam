@@ -59,6 +59,11 @@
 #define LEFT_HANDED
 #endif
 
+// #define OFFSCREEN_PIXEL_FORMAT (SG_PIXELFORMAT_RGBA8)
+#define OFFSCREEN_PIXEL_FORMAT (SG_PIXELFORMAT_RGBA8)
+#define OFFSCREEN_SAMPLE_COUNT (1)
+#define DISPLAY_SAMPLE_COUNT (1)
+
 // Coordinate-system-handedness generic
 static inline HMM_Quat HMM_M4ToQ(HMM_Mat4 M) {
 #ifdef LEFT_HANDED
@@ -1942,7 +1947,7 @@ float clip_adjust_time_to_fit_range(const Clip *clip, float in_time) {
     }
     in_time =
         fmodf(in_time - clip->start_time, clip->end_time - clip->start_time);
-    if (in_time < 0.0f) {
+    if (flt_zero(in_time)) {
       in_time += clip->end_time - clip->start_time;
     }
     in_time = in_time + clip->start_time;
@@ -2436,8 +2441,20 @@ void orbit_camera_update(OrbitCamera *camera) {
 
 static struct {
   float rx, ry;
-  sg_pipeline pip;
-  sg_bindings bind;
+  struct {
+    sg_pass_action pass_action;
+    sg_pass pass;
+    sg_pipeline pip;
+    sg_bindings bind;
+  } offscreen;
+  struct {
+    sg_pass_action pass_action;
+    sg_pipeline pip;
+    sg_bindings bind;
+  } display;
+
+  bool use_cel_shading;
+
   BoneMesh bm;
   Skeleton sk;
   clip_array_t clips;
@@ -2525,11 +2542,13 @@ typedef struct {
 
 void init(void) {
   ZERO(state);
+  state.use_cel_shading = true;
 
   sg_setup(&(sg_desc){
       .context = sapp_sgcontext(),
       .logger.func = slog_func,
   });
+  stm_setup();
 
   cgltf_options opts = {};
   ZERO(opts);
@@ -2561,8 +2580,8 @@ void init(void) {
                                              model_data->nodes_count);
   anim_path = "./src/assets/vanguard@bellydance.glb";
   cgltf_load_data(&anim_data, &opts2, anim_path);
-  clip_load_additional_animations_from_cgltf(anim_data, "bellydance",
-                                             &state.clips, model_data->nodes,
+  clip_load_additional_animations_from_cgltf(anim_data, "sensual", &state.clips,
+                                             model_data->nodes,
                                              model_data->nodes_count);
   anim_path = "./src/assets/vanguard@samba.glb";
   cgltf_load_data(&anim_data, &opts2, anim_path);
@@ -2673,8 +2692,42 @@ void init(void) {
                         .data = SG_RANGE_ARR(u32, state.bm.indices),
                         .label = "model-indices"});
 
+  // default pass action: clear to green-ish
+  state.display.pass_action = (sg_pass_action){
+      .colors[0] = {.load_action = SG_LOADACTION_CLEAR,
+                    .clear_value = {0.25f, 0.65f, 0.45f, 1.0f}},
+  };
+
+  // offscreen pass action: clear to grey
+  state.offscreen.pass_action = (sg_pass_action){
+      .colors[0] = {.load_action = SG_LOADACTION_CLEAR,
+                    .store_action = SG_STOREACTION_STORE,
+                    .clear_value = {0.25f, 0.25f, 0.25f, 1.0f}}};
+
+  // create a render pass object with one color and one depth render attachment
+  // image NOTE: we need to explicitly set the sample count in the attachment
+  // image objects, because the offscreen pass uses a different sample count
+  // than the display render pass (the display render pass is multi-sampled, the
+  // offscreen pass is not)
+  sg_image_desc img_desc = {.render_target = true,
+                            // .width = 800,
+                            // .height = 600,
+                            .width = 256,
+                            .height = 256,
+                            .pixel_format = OFFSCREEN_PIXEL_FORMAT,
+                            .sample_count = OFFSCREEN_SAMPLE_COUNT,
+                            .label = "color-image"};
+  sg_image color_img = sg_make_image(&img_desc);
+  img_desc.pixel_format = SG_PIXELFORMAT_DEPTH;
+  img_desc.label = "depth-image";
+  sg_image depth_img = sg_make_image(&img_desc);
+  state.offscreen.pass =
+      sg_make_pass(&(sg_pass_desc){.color_attachments[0].image = color_img,
+                                   .depth_stencil_attachment.image = depth_img,
+                                   .label = "offscreen-pass"});
+
   /* create pipeline object */
-  state.pip = sg_make_pipeline(&(sg_pipeline_desc){
+  state.offscreen.pip = sg_make_pipeline(&(sg_pipeline_desc){
       .layout =
           {
               /* test to provide buffer stride, but no attr offsets */
@@ -2695,6 +2748,7 @@ void init(void) {
               .buffers[4].stride = sizeof(u8vec4),
               .attrs[4] = {.format = SG_VERTEXFORMAT_UBYTE4, .buffer_index = 4},
           },
+      .sample_count = OFFSCREEN_SAMPLE_COUNT,
       .shader = shd,
       .index_type = SG_INDEXTYPE_UINT32,
 #ifdef SOKOL_METAL
@@ -2710,16 +2764,19 @@ void init(void) {
           {
               .write_enabled = true,
               .compare = SG_COMPAREFUNC_LESS_EQUAL,
+              .pixel_format = SG_PIXELFORMAT_DEPTH,
           },
-      .label = "cube-pipeline"});
+      .colors[0].pixel_format = OFFSCREEN_PIXEL_FORMAT,
+
+      .label = "offscreen-pipeline"});
 
   /* setup resource bindings */
-  state.bind = (sg_bindings){.vertex_buffers[0] = vbuf,
-                             .vertex_buffers[1] = normbuf,
-                             .vertex_buffers[2] = txbuf,
-                             .vertex_buffers[3] = weightbuf,
-                             .vertex_buffers[4] = influencebuf,
-                             .index_buffer = ibuf};
+  state.offscreen.bind = (sg_bindings){.vertex_buffers[0] = vbuf,
+                                       .vertex_buffers[1] = normbuf,
+                                       .vertex_buffers[2] = txbuf,
+                                       .vertex_buffers[3] = weightbuf,
+                                       .vertex_buffers[4] = influencebuf,
+                                       .index_buffer = ibuf};
 
   // create a checkerboard texture
   uint32_t pixels[4 * 4] = {
@@ -2734,23 +2791,107 @@ void init(void) {
   //     stbi_load("./src/assets/stacy.jpeg", &width, &height, &channels, 4);
   // u8 *rgba_image =
   //     stbi_load("./src/assets/vanguard.png", &width, &height, &channels, 4);
-  u8 *rgba_image = stbi_load("./src/assets/vanguard_pixel.png", &width, &height,
-                             &channels, 4);
+  u8 *rgba_image =
+      stbi_load("./src/assets/vanguard.png", &width, &height, &channels, 4);
   safecheck(rgba_image != NULL);
 
-  state.bind.fs.images[SLOT_tex] = sg_make_image(&(sg_image_desc){
+  state.offscreen.bind.fs.images[SLOT_tex] = sg_make_image(&(sg_image_desc){
       .width = width,
       .height = height,
-      .pixel_format = SG_PIXELFORMAT_RGBA8,
+      .pixel_format = OFFSCREEN_PIXEL_FORMAT,
+      .sample_count = OFFSCREEN_SAMPLE_COUNT,
       //  .data.subimage[0][0] = SG_RANGE(pixels),
       .data.subimage[0][0] = (sg_range){rgba_image, width * height * 4},
       .label = "cube-texture"});
 
   // create a sampler object with default attributes
-  state.bind.fs.samplers[SLOT_smp] = sg_make_sampler(&(sg_sampler_desc){0});
+  state.offscreen.bind.fs.samplers[SLOT_smp] =
+      sg_make_sampler(&(sg_sampler_desc){0});
+
+  // Vertex data structure for fullscreen quad
+  typedef struct {
+    float x, y, z; // position
+    float u, v;    // texture coordinates
+  } fullscreen_vertex;
+
+// Create the vertex data for fullscreen quad
+#ifdef SOKOL_METAL
+  fullscreen_vertex vertices[] = {
+      {-1.0f, -1.0f, 0.0f, 0.0f, 1.0f}, // bottom-left corner
+      {1.0f, -1.0f, 0.0f, 1.0f, 1.0f},  // bottom-right corner
+      {1.0f, 1.0f, 0.0f, 1.0f, 0.0f},   // top-right corner
+      {-1.0f, 1.0f, 0.0f, 0.0f, 0.0f},  // top-left corner
+  };
+#else
+  fullscreen_vertex vertices[] = {
+      {-1.0f, -1.0f, 0.0f, 0.0f, 0.0f}, // bottom-left corner
+      {1.0f, -1.0f, 0.0f, 1.0f, 0.0f},  // bottom-right corner
+      {1.0f, 1.0f, 0.0f, 1.0f, 1.0f},   // top-right corner
+      {-1.0f, 1.0f, 0.0f, 0.0f, 1.0f},  // top-left corner
+  };
+#endif
+
+  // Create the index data for fullscreen quad
+  uint16_t indices[] = {
+      0, 1, 2, // First triangle
+      2, 3, 0  // Second triangle
+  };
+
+  // Create Sokol GFX buffers for fullscreen quad
+  sg_buffer display_vbuf = sg_make_buffer(&(sg_buffer_desc){
+      .data = SG_RANGE(vertices), .label = "fullscreen-quad-vertices"});
+
+  sg_buffer display_ibuf =
+      sg_make_buffer(&(sg_buffer_desc){.type = SG_BUFFERTYPE_INDEXBUFFER,
+                                       .data = SG_RANGE(indices),
+                                       .label = "fullscreen-quad-indices"});
+
+  // and another pipeline-state-object for the default pass
+  state.display.pip = sg_make_pipeline(&(sg_pipeline_desc){
+      .layout = {.buffers[0].stride = sizeof(vec3) + sizeof(vec2),
+                 .attrs[ATTR_vs_cel_position] =
+                     {
+                         .format = SG_VERTEXFORMAT_FLOAT3,
+                     },
+                 .attrs[ATTR_vs_cel_texcoord0] = {.format =
+                                                      SG_VERTEXFORMAT_FLOAT2}},
+      .shader = sg_make_shader(cel_shader_desc(sg_query_backend())),
+      .index_type = SG_INDEXTYPE_UINT16,
+      .sample_count = DISPLAY_SAMPLE_COUNT,
+#ifdef SOKOL_METAL
+      .face_winding = SG_FACEWINDING_CCW,
+      .cull_mode = SG_CULLMODE_BACK,
+  // .face_winding = SG_FACEWINDING_CW,
+  // .cull_mode = SG_CULLMODE_BACK,
+#else
+      .face_winding = SG_FACEWINDING_CCW,
+      .cull_mode = SG_CULLMODE_BACK,
+#endif
+      .depth =
+          {
+              .compare = SG_COMPAREFUNC_LESS_EQUAL,
+              .write_enabled = true,
+          },
+      .label = "default-pipeline"});
+
+  // a sampler object for sampling the render target texture
+  sg_sampler display_smp = sg_make_sampler(&(sg_sampler_desc){
+      .min_filter = SG_FILTER_LINEAR,
+      .mag_filter = SG_FILTER_LINEAR,
+      .wrap_u = SG_WRAP_REPEAT,
+      .wrap_v = SG_WRAP_REPEAT,
+  });
+
+  // resource bindings to render a textured shape, using the offscreen render
+  // target as texture
+  state.display.bind = (sg_bindings){.vertex_buffers[0] = display_vbuf,
+                                     .index_buffer = display_ibuf,
+                                     .fs = {
+                                         .images[SLOT_tex] = color_img,
+                                         .samplers[SLOT_smp] = display_smp,
+                                     }};
 
   set_vs_params();
-  stm_setup();
 
 #ifndef DISABLE_GUI
   // use sokol-nuklear with all default-options (we're not doing
@@ -2769,6 +2910,7 @@ static int draw_debug_gui(struct nk_context *ctx);
 #endif
 
 static u64 last_time = 0;
+static double updated_fps_time = 0;
 void frame(void) {
 #ifndef DISABLE_GUI
   struct nk_context *ctx = snk_new_frame();
@@ -2850,33 +2992,54 @@ void frame(void) {
   state.vs_params.view = view;
   state.vs_params.projection = proj;
 
-  sg_pass_action pass_action = {
-      .colors[0] = {.load_action = SG_LOADACTION_CLEAR,
-                    .clear_value = {0.25f, 0.5f, 0.75f, 1.0f}}};
-  // sg_pass_action pass_action = {
-  //     .colors[0] = {.load_action = SG_LOADACTION_CLEAR,
-  //                   .clear_value = {0.0, 0.0, 0.0, 1.0f}}};
-  sg_begin_default_pass(&pass_action, (int)w, (int)h);
-  sg_apply_pipeline(state.pip);
-  sg_apply_bindings(&state.bind);
+  sg_begin_pass(state.offscreen.pass, &state.offscreen.pass_action);
+  sg_apply_pipeline(state.offscreen.pip);
+  sg_apply_bindings(&state.offscreen.bind);
   sg_apply_uniforms(SG_SHADERSTAGE_VS, SLOT_vs_params,
                     &SG_RANGE(state.vs_params));
   sg_apply_uniforms(SG_SHADERSTAGE_FS, SLOT_fs_params, &SG_RANGE(fs_params));
   sg_draw(0, state.bm.indices.len, 1);
+  sg_end_pass();
 
+  fs_params_cel_t cel_params;
+  cel_params.cell_shading = !state.use_cel_shading ? 1 : 0;
+  sg_begin_default_pass(&state.display.pass_action, w, h);
+  sg_apply_pipeline(state.display.pip);
+  sg_apply_bindings(&state.display.bind);
+  sg_apply_uniforms(SG_SHADERSTAGE_FS, SLOT_fs_params, &SG_RANGE(cel_params));
+  // sg_apply_uniforms(SG_SHADERSTAGE_VS, SLOT_vs_params, &SG_RANGE(vs_params));
+  sg_draw(0, 6, 1);
 #ifndef DISABLE_GUI
+  // TODO: this probably can go in its own pass
   snk_render(sapp_width(), sapp_height());
 #endif
-
   sg_end_pass();
+
   sg_commit();
+
+  // if (stm_sec(stm_diff(last_time, updated_fps_time)) >= 1) {
+  //   char buf[128];
+  //   sprintf(buf, "occam (%f FPS)", sapp_frame_duration() * 1000);
+  //   sapp_set_window_title((const char *)&buf);
+  //   updated_fps_time = last_time;
+  // }
 }
 
 void cleanup(void) { sg_shutdown(); }
 
 static bool mouse_dragging = false;
 
+static bool skip_bc_nuklear_gui = false;
 void input(const sapp_event *ev) {
+#ifndef DISABLE_GUI
+  snk_handle_event(ev);
+
+  if (skip_bc_nuklear_gui) {
+    skip_bc_nuklear_gui = false;
+    return;
+  }
+  skip_bc_nuklear_gui = false;
+#endif
   switch (ev->type) {
   case SAPP_EVENTTYPE_MOUSE_DOWN:
     if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT) {
@@ -2909,10 +3072,6 @@ void input(const sapp_event *ev) {
   default:
     break;
   }
-
-#ifndef DISABLE_GUI
-  snk_handle_event(ev);
-#endif
 }
 
 sapp_desc sokol_main(int argc, char *argv[]) {
@@ -2923,8 +3082,8 @@ sapp_desc sokol_main(int argc, char *argv[]) {
   printf("Using Metal\n");
   const char *name = "occam (Metal)";
 #else
-  printf("Using OpenGL\n");
-  const char *name = "occam (OpenGL)";
+  printf("Using Metal\n");
+  const char *name = "occam (Metal)";
 #endif
 
 #ifdef CPU_SKIN
@@ -2941,7 +3100,8 @@ sapp_desc sokol_main(int argc, char *argv[]) {
       // .event_cb = __dbgui_event,
       .width = 800,
       .height = 600,
-      .sample_count = 4,
+      // .sample_count = OFFSCREEN_SAMPLE_COUNT,
+      .sample_count = DISPLAY_SAMPLE_COUNT,
       .window_title = name,
       .icon.sokol_default = true,
       .logger.func = slog_func,
@@ -2950,14 +3110,19 @@ sapp_desc sokol_main(int argc, char *argv[]) {
 
 #ifndef DISABLE_GUI
 static int draw_debug_gui(struct nk_context *ctx) {
+  if (nk_item_is_any_active(ctx)) {
+    skip_bc_nuklear_gui = true;
+  }
   if (nk_begin(ctx, "Animation Selector", nk_rect(50, 50, 220, 220),
                NK_WINDOW_BORDER | NK_WINDOW_MOVABLE | NK_WINDOW_CLOSABLE)) {
-
     nk_layout_row_static(ctx, 30, 200, 1);
     if (nk_checkbox_label(ctx, "Disable loop",
                           &state.clips.ptr[state.animation.clip_idx].looping)) {
       // state.animation.t = 0.0;
     }
+    // if (nk_checkbox_label(ctx, "Cel shading", &state.use_cel_shading)) {
+    // state.animation.t = 0.0;
+    // }
     int selected_animation =
         nk_combo(ctx, state.gui.animations.ptr, state.gui.animations.len,
                  state.animation.clip_idx, 25, nk_vec2(200, 200));
